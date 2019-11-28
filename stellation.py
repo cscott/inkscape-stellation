@@ -1,7 +1,7 @@
 #! /usr/bin/env python
 # -*- coding: utf-8 -*-
 '''
-Example of extensions template for inkscape
+Stellation extension for Inkscape.
 
 '''
 
@@ -69,7 +69,7 @@ def draw_SVG_circle(parent, r, cx, cy, name, style):
 
 ### Your main function subclasses the inkex.Effect class
 
-class Myextension(inkex.Effect): # choose a better name
+class StellationEffect(inkex.Effect): # choose a better name
     
     def __init__(self):
         " define how the options are mapped from the inx file "
@@ -291,7 +291,7 @@ class Myextension(inkex.Effect): # choose a better name
         text.text = "%4.3f" %(param1*param2)
 
 if __name__ == '__main__':
-    e = Myextension()
+    e = StellationEffect()
     e.affect()
 
 # Notes
