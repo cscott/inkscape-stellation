@@ -8,13 +8,22 @@ Stellation extension for Inkscape.
 import inkex       # Required
 import simplestyle # will be needed here for styles support
 import os          # here for alternative debug method only - so not usually required
+import json
 # many other useful ones in extensions folder. E.g. simplepath, cubicsuperpath, ...
 
 from math import cos, sin, radians
 
-__version__ = '0.2'
+__version__ = '0.0.0'
 
 inkex.localize()
+
+def tolerant_json(str, default=None):
+    if str is None:
+        return default
+    try:
+        return json.loads(str)
+    except ValueError:
+        return default
 
 ### Your helper functions go here
 def points_to_svgd(p, close=True):
@@ -69,12 +78,16 @@ def draw_SVG_circle(parent, r, cx, cy, name, style):
 
 ### Your main function subclasses the inkex.Effect class
 
-class StellationEffect(inkex.Effect): # choose a better name
-    
+class StellationEffect(inkex.Effect):
+
     def __init__(self):
         " define how the options are mapped from the inx file "
         inkex.Effect.__init__(self) # initialize the super class
-        
+        self.OptionParser.add_option(
+            '--add', action="store", type="inkbool", dest="add", default=False,
+            help="Add a new plane"
+        )
+
         # Two ways to get debug info:
         # OR just use inkex.debug(string) instead...
         try:
@@ -82,59 +95,14 @@ class StellationEffect(inkex.Effect): # choose a better name
         except:
             self.tty = open(os.devnull, 'w')  # '/dev/null' for POSIX, 'nul' for Windows.
             # print >>self.tty, "gears-dev " + __version__
-            
-        # Define your list of parameters defined in the .inx file
-        self.OptionParser.add_option("-t", "--param1",
-                                     action="store", type="int",
-                                     dest="param1", default=24,
-                                     help="command line help")
-        
-        self.OptionParser.add_option("-d", "--param2",
-                                     action="store", type="float",
-                                     dest="param2", default=1.0,
-                                     help="command line help")
-        
-        self.OptionParser.add_option("-s", "--param3",
-                                     action="store", type="string", 
-                                     dest="param3", default='choice1',
-                                     help="command line help")
 
-        self.OptionParser.add_option("-u", "--units",
-                                     action="store", type="string",
-                                     dest="units", default='mm',
-                                     help="Units this dialog is using")
-
-        self.OptionParser.add_option("", "--units2",
-                                     action="store", type="string",
-                                     dest="units2", default='mm',
-                                     help="command line help")
-        
-        self.OptionParser.add_option("-x", "--achoice",
-                                     action="store", type="inkbool", 
-                                     dest="achoice", default=False,
-                                     help="command line help")
-
-        self.OptionParser.add_option("", "--accuracy", # note no cli shortcut
-                                     action="store", type="int",
-                                     dest="accuracy", default=0,
-                                     help="command line help")
-        self.OptionParser.add_option('-f', '--strokeColour', action = 'store',
-                                     type = 'string', dest = 'strokeColour',
-                                     default = 896839168, # Blue (see below how to discover value to put here)
-                                     help = 'The line colour.')
-        # here so we can have tabs - but we do not use it directly - else error
-        self.OptionParser.add_option("", "--active-tab",
-                                     action="store", type="string",
-                                     dest="active_tab", default='title', # use a legitmate default
-                                     help="Active tab.")
-        
     def getUnittouu(self, param):
         " for 0.48 and 0.91 compatibility "
         try:
             return inkex.unittouu(param)
         except AttributeError:
             return self.unittouu(param)
-            
+
     def getColorString(self, longColor, verbose=False):
         """ Convert the long into a #RRGGBB color value
             - verbose=true pops up value for us in defaults
@@ -176,8 +144,103 @@ class StellationEffect(inkex.Effect): # choose a better name
 
 ### -------------------------------------------------------------------
 ### This is your main function and is called when the extension is run.
-    
+
     def effect(self):
+        #self.ensure_base()
+        if self.options.add:
+            self.add_new_plane()
+        for layer in self.stellation_layers():
+            self.update_layer(layer)
+
+    def update_layer(self, layer):
+        meta = self.ensure_layer(layer, 'Meta')
+        settings = self.parse_meta(meta)
+
+        self.update_layer_guidelines(layer, settings)
+
+        self.update_layer_intersections(layer, settings)
+        pass
+
+    def update_layer_guidelines(self, layer, settings):
+        guidelines = self.ensure_layer(layer, 'Guidelines')
+        # delete all existing guidelines
+        self.delete_layer_contents(guidelines)
+        # compute new guidelines
+        pass
+
+    def update_layer_intersections(self, layer, settings):
+        intersections = self.ensure_layer(layer, 'Intersections')
+        # delete all existing intersections
+        self.delete_layer_contents(intersections)
+        # compute new intersections
+        pass
+
+    def delete_layer_contents(self, layer):
+        attribs = layer.items()
+        layer.clear()
+        for key, value in attribs:
+            layer.set(key, value)
+
+    def add_new_plane(self):
+        svg = self.document.getroot()
+        layer = inkex.etree.SubElement(svg, inkex.addNS('g', 'svg'))
+        layer.set(inkex.addNS('label', 'inkscape'), 'Plane');
+        layer.set(inkex.addNS('groupmode', 'inkscape'), 'layer')
+        layer.set('data-stellation', 'plane')
+
+    def parse_meta(self, meta):
+        DEFAULT_PLANE = {
+            'type': 'dodecahedron',
+            'size': '5',
+            'units': 'inch',
+        }
+        # Look for the text element
+        els = meta.xpath("./svg:text[@data-stellation]", namespaces=inkex.NSS)
+        if len(els) > 0:
+            metaText = els[0].text
+            metaWas = els[0].get('data-stellation')
+        else:
+            metaText = json.dumps(DEFAULT_PLANE)
+            metaWas = None
+            el = inkex.etree.SubElement(meta, inkex.addNS('text', 'svg'), {
+                inkex.addNS('label', 'inkscape'): 'Annotation',
+                'data-stellation': '',
+                'style': simplestyle.formatStyle({
+                    'font-size': '20px',
+                    'font-style': 'normal',
+                    'font-weight': 'normal',
+                    'fill': '#000',
+                    'font-family': 'sans-serif',
+                    'text-anchor': 'left',
+                    'text-align': 'left',
+                }),
+                'x': '0',
+                'y': '0',
+            })
+            el.text = metaText
+        # parse metaText
+        newData = tolerant_json(metaText)
+        oldData = tolerant_json(metaWas)
+        inkex.debug(metaText)
+        # if metaWas != None and metaWas != "": rescale objects
+        meta.set('data-stellation', json.dumps(newData))
+        return newData
+
+    def stellation_layers(self):
+        return self.document.xpath("//svg:svg/svg:g[@data-stellation='plane']", namespaces=inkex.NSS)
+
+    def ensure_layer(self, parent, name, locked=True):
+        for g in parent.xpath('./svg:g', namespaces=inkex.NSS):
+            if g.get(inkex.addNS('label', 'inkscape')) == name:
+                return g
+        layer = inkex.etree.SubElement(parent, 'g');
+        layer.set(inkex.addNS('label', 'inkscape'), name);
+        layer.set(inkex.addNS('groupmode', 'inkscape'), 'layer')
+        if locked:
+            layer.set(inkex.addNS('insensitive', 'sodipodi'), 'true')
+        return layer
+
+    def old_effect(self):
         """ Calculate Gear factors from inputs.
             - Make list of radii, angles, and centers for each tooth and 
               iterate through them

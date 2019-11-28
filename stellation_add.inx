@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<inkscape-extension xmlns="http://www.inkscape.org/namespace/inkscape/extension">
+    <_name>Add new plane</_name>
+    <id>net.cscott.inkscape.stellation.add</id>
+    <dependency type="executable" location="extensions">inkscape-stellation/stellation.py</dependency>
+<!--
+    <param name="help" type="description">Add new stellation plane</param>
+    <param name="version" type="description">Stellation 0.0.0</param>
+-->
+    <param name="add" type="boolean" gui-hidden="true">true</param>
+
+    <effect needs-live-preview="false">
+        <object-type>all</object-type>
+        <effects-menu _name="Add new plane">
+            <submenu _name="Stellation" />
+        </effects-menu>
+    </effect>
+    <script>
+        <command reldir="extensions" interpreter="python">inkscape-stellation/stellation.py</command>
+    </script>
+</inkscape-extension>
