@@ -1,5 +1,6 @@
 #! /usr/bin/env python
 # -*- coding: utf-8 -*-
+from __future__ import division
 '''
 Stellation extension for Inkscape.
 
@@ -11,7 +12,8 @@ import os          # here for alternative debug method only - so not usually req
 import json
 # many other useful ones in extensions folder. E.g. simplepath, cubicsuperpath, ...
 
-from math import cos, sin, radians
+from math import cos, sin, radians, sqrt, pi
+phi = (1+sqrt(5))/2
 
 __version__ = '0.0.0'
 
@@ -74,7 +76,179 @@ def draw_SVG_circle(parent, r, cx, cy, name, style):
                     inkex.addNS('label','inkscape'): name}
     circle = inkex.etree.SubElement(parent, inkex.addNS('circle','svg'), circ_attribs )
 
+# if a -> b -> c a counter-clockwise turn?
+# +1 if counter-clockwise, -1 is clockwise, 0 if colinear
+# XXX 2D ONLY XXX
+def ccw(a, b, c):
+    area2 = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+    if area2 < 0:
+        return -1
+    elif area2 > 0:
+        return +1
+    else:
+        return 0
 
+# Valid on 3d points
+def ccw_from_origin(a, b, c, V = None):
+    N = normal(a, b, c)
+    w = N.dot(a if V is None else (a - V))
+    if w < 0:
+        return -1
+    elif w > 0:
+        return +1
+    else:
+        return 0
+
+def normal(a, b, c):
+    return (b - a).cross(c - a)
+
+class Point:
+    """Points are three dimensional."""
+    x = 0
+    y = 0
+    z = 0
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+    def __repr__(self):
+        return "Point(%r,%r,%r)" % (self.x, self.y, self.z)
+    def __str__(self):
+        return "(%f,%f,%f)" % (self.x, self.y, self.z)
+    def __add__(self, other):
+        return Point(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __sub__(self, other):
+        return Point(self.x - other.x, self.y - other.y, self.z - other.z)
+    def __mul__(self, other):
+        return Point(self.x * other, self.y * other, self.z * other)
+    def __truediv__(self, other):
+        return Point(self.x / other, self.y / other, self.z / other)
+    def __neg__(self):
+        return Point(-self.x, -self.y, -self.z)
+    def __iadd__(self, other):
+        self.x += other.x
+        self.y += other.y
+        self.z += other.z
+        return self
+    def __itruediv__(self, other):
+        self.x /= other
+        self.y /= other
+        self.z /= other
+        return self
+    def dist(self, other=None):
+        return sqrt(self.dist2(other))
+    def dist2(self, other=None):
+        pt = self if other is None else (self - other)
+        return (pt.x*pt.x + pt.y*pt.y + pt.z*pt.z)
+    def cross(self, other):
+        return Point(
+            self.y * other.z - self.z * other.y,
+            -(self.x * other.z - self.z * other.x),
+            self.x * other.y - self.y * other.x
+        )
+    def dot(self, other):
+        return (self.x * other.x) + (self.y * other.y) + (self.z * other.z)
+    def normalize(self):
+        return self / self.dist()
+
+class Face:
+    """A face is a planar collection of points"""
+    points = None
+    def __init__(self, *points):
+        self.points = points
+        # check that points wind CW when viewed from origin (inside)
+        l = len(points)
+        for i in xrange(0, l):
+            assert ccw_from_origin(points[i], points[(i+1)%l], points[(i+2)%l]) > 0
+    def __repr__(self):
+        return "Face(" + (",".join(repr(pt) for pt in self.points)) + ")"
+    def __str__(self):
+        return "Face(" + (",".join(str(pt) for pt in self.points)) + ")"
+    def centroid(self):
+        sum = Point(0,0,0)
+        count = 0
+        for pt in self.points:
+            sum += pt
+            count += 1
+        return sum / count
+    def plane(self):
+        return Plane(
+            self.centroid(),
+            normal(self.points[0], self.points[1], self.points[2])
+        )
+    def __mul__(self, other):
+        return Face(*[pt*other for pt in self.points])
+    def __truediv__(self, other):
+        return Face(*[pt/other for pt in self.points])
+
+class Line:
+    """A line is represented as a point and a direction vector."""
+    point = None
+    direction = None
+    def __init__(self, point, direction):
+        self.point = point
+        self.direction = direction.normalize()
+    def __repr__(self):
+        return "Line(%r,%r)" % (self.point, self.direction)
+
+class Plane:
+    """A plane is represented as a point (usually the center point of a face)
+    and a normal vector."""
+    point = None
+    normal = None
+    def __init__(self, point, normal):
+        # Passes through this point
+        self.point = point
+        # Unit normal vector; also the direction cosines of the angle n
+        # makes with the xyz-axes
+        self.normal = normal.normalize()
+    def __repr__(self):
+        return "Plane(%r,%r)" % (self.point, self.normal)
+    def d(self):
+        """Perpendicular distance from the origin to the plane."""
+        return -(self.normal.dot(self.point))
+    def intersect(self, other):
+        if isinstance(other, Plane):
+            return self.intersectPlane(other)
+        assert False
+    def intersectPlane(self, plane):
+        n3 = self.normal.cross(plane.normal)
+        if n3.dist() < 0.00001: # arbitrary epsilon
+            return None
+        # Now find a point on the line
+        n1 = self.normal
+        d1 = self.d()
+        n2 = plane.normal
+        d2 = plane.d()
+        P0 = (n1*d2 - n2*d1).cross(n3) / n3.dist2()
+        return Line(P0, n3)
+
+class Shape:
+    faces = None
+    planes = None
+    def __init__(self, faces):
+        self.faces = faces
+        self.planes = [f.plane() for f in self.faces]
+
+class Dodecahedron(Shape):
+    """A dodecahedron"""
+    def __init__(self, diameter=1):
+        def mkTop(i):
+            i = i % 5
+            return Point(2*cos((2/5)*pi*i), 2*sin((2/5)*pi*i), phi+1)
+        def mkBot(i):
+            i = i % 5
+            return Point(2*phi*cos((2/5)*pi*i), 2*phi*sin((2/5)*pi*i), phi-1)
+        faces = [
+            Face(*[mkTop(i) for i in xrange(0, 5)])
+        ] + [
+            Face(mkBot(i+1), mkTop(i+1), mkTop(i), mkBot(i), -mkBot(i+3)) for i in xrange(0, 5)
+        ] + [
+            Face(-mkBot(i), -mkTop(i), -mkTop(i+1), -mkBot(i+1), mkBot(i+3)) for i in xrange(0, 5)
+        ] + [
+            Face(*[-mkTop(4 - i) for i in xrange(0,5)])
+        ]
+        Shape.__init__(self, [f*(diameter/4) for f in faces])
 
 ### Your main function subclasses the inkex.Effect class
 
