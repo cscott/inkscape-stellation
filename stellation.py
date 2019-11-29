@@ -14,18 +14,12 @@ import json
 
 from math import cos, sin, radians, sqrt, pi
 phi = (1+sqrt(5))/2
+EPSILON = .00001 # arbitrary small #
 
 __version__ = '0.0.0'
 
 inkex.localize()
 
-def tolerant_json(str, default=None):
-    if str is None:
-        return default
-    try:
-        return json.loads(str)
-    except ValueError:
-        return default
 
 ### Your helper functions go here
 def points_to_svgd(p, close=True):
@@ -40,41 +34,6 @@ def points_to_svgd(p, close=True):
     if close:
         svgd += 'z'
     return svgd
-
-def points_to_bbox(p):
-    """ from a list of points (x,y pairs)
-        - return the lower-left xy and upper-right xy
-    """
-    llx = urx = p[0][0]
-    lly = ury = p[0][1]
-    for x in p[1:]:
-        if   x[0] < llx: llx = x[0]
-        elif x[0] > urx: urx = x[0]
-        if   x[1] < lly: lly = x[1]
-        elif x[1] > ury: ury = x[1]
-    return (llx, lly, urx, ury)
-
-def points_to_bbox_center(p):
-    """ from a list of points (x,y pairs)
-        - find midpoint of bounding box around all points
-        - return (x,y)
-    """
-    bbox = points_to_bbox(p)
-    return ((bbox[0]+bbox[2])/2.0, (bbox[1]+bbox[3])/2.0)
-
-def point_on_circle(radius, angle):
-    " return xy coord of the point at distance radius from origin at angle "
-    x = radius * cos(angle)
-    y = radius * sin(angle)
-    return (x, y)
-
-def draw_SVG_circle(parent, r, cx, cy, name, style):
-    " structre an SVG circle entity under parent "
-    circ_attribs = {'style': simplestyle.formatStyle(style),
-                    'cx': str(cx), 'cy': str(cy), 
-                    'r': str(r),
-                    inkex.addNS('label','inkscape'): name}
-    circle = inkex.etree.SubElement(parent, inkex.addNS('circle','svg'), circ_attribs )
 
 # if a -> b -> c a counter-clockwise turn?
 # +1 if counter-clockwise, -1 is clockwise, 0 if colinear
@@ -150,20 +109,31 @@ class Point:
         return (self.x * other.x) + (self.y * other.y) + (self.z * other.z)
     def normalize(self):
         return self / self.dist()
+    def transform(self, matrix):
+        return matrix.transform(self)
+
+class Vector(Point):
+    pass
 
 class Face:
     """A face is a planar collection of points"""
     points = None
-    def __init__(self, *points):
+    inside = None
+    def __init__(self, *points, **kwargs):
         self.points = points
+        self.inside = kwargs.get('inside')
         # check that points wind CW when viewed from origin (inside)
         l = len(points)
         for i in xrange(0, l):
-            assert ccw_from_origin(points[i], points[(i+1)%l], points[(i+2)%l]) > 0
+            assert ccw_from_origin(points[i], points[(i+1)%l], points[(i+2)%l], V=self.inside) > 0
     def __repr__(self):
         return "Face(" + (",".join(repr(pt) for pt in self.points)) + ")"
     def __str__(self):
         return "Face(" + (",".join(str(pt) for pt in self.points)) + ")"
+    def __mul__(self, other):
+        return Face(*[pt*other for pt in self.points])
+    def __truediv__(self, other):
+        return Face(*[pt/other for pt in self.points])
     def centroid(self):
         sum = Point(0,0,0)
         count = 0
@@ -176,10 +146,11 @@ class Face:
             self.centroid(),
             normal(self.points[0], self.points[1], self.points[2])
         )
-    def __mul__(self, other):
-        return Face(*[pt*other for pt in self.points])
-    def __truediv__(self, other):
-        return Face(*[pt/other for pt in self.points])
+    def transform(self, matrix):
+        return Face(*[p.transform(matrix) for p in self.points], **{
+            'inside': None if self.inside is None else \
+                self.inside.transform(matrix)
+        })
 
 class Line:
     """A line is represented as a point and a direction vector."""
@@ -190,6 +161,14 @@ class Line:
         self.direction = direction.normalize()
     def __repr__(self):
         return "Line(%r,%r)" % (self.point, self.direction)
+    def intersect(self, other):
+        if isinstance(other, Plane):
+            return other.intersectLine(self)
+        assert False
+    def transform(self, matrix):
+        p1 = self.point.transform(matrix)
+        p2 = (self.point + self.direction).transform(matrix)
+        return Line(p1, p2 - p1)
 
 class Plane:
     """A plane is represented as a point (usually the center point of a face)
@@ -207,13 +186,25 @@ class Plane:
     def d(self):
         """Perpendicular distance from the origin to the plane."""
         return -(self.normal.dot(self.point))
+    def transform(self, matrix):
+        p1 = self.point.transform(matrix)
+        p2 = (self.point + self.normal).transform(matrix)
+        return Plane(p1, p2 - p1)
     def intersect(self, other):
         if isinstance(other, Plane):
             return self.intersectPlane(other)
+        if isinstance(other, Line):
+            return self.intersectLine(other)
         assert False
+    def intersectLine(self, line):
+        nu = self.normal.dot(line.direction)
+        if abs(nu) < EPSILON:
+            return None # parallel
+        s = self.normal.dot(self.point - line.point) / nu
+        return line.point + (line.direction * s)
     def intersectPlane(self, plane):
         n3 = self.normal.cross(plane.normal)
-        if n3.dist() < 0.00001: # arbitrary epsilon
+        if n3.dist() < EPSILON: # arbitrary epsilon
             return None
         # Now find a point on the line
         n1 = self.normal
@@ -223,12 +214,60 @@ class Plane:
         P0 = (n1*d2 - n2*d1).cross(n3) / n3.dist2()
         return Line(P0, n3)
 
+class TransformMatrix:
+    rows = None
+    def __init__(self, *rows):
+        self.rows = rows
+    def __repr__(self):
+        return "TransformMatrix(" + ",".join(repr(r) for r in self.rows) + ")"
+    def __mul__(self, other):
+        a = self
+        b = other
+        m = len(a.rows)
+        n = len(b.rows)
+        assert len(a.rows[0]) == n
+        p = len(b.rows[0])
+        c = [[0 for col in xrange(p)] for row in xrange(m)]
+        for i in xrange(m):
+            for j in xrange(p):
+                for k in xrange(n):
+                    c[i][j] += a.rows[i][k] * b.rows[k][j]
+        return TransformMatrix(*c)
+    def transform(self, point):
+        m = self * TransformMatrix([point.x],[point.y],[point.z],[1])
+        return Point(m.rows[0][0], m.rows[1][0], m.rows[2][0])
+
+    @staticmethod
+    def translate(vector):
+        return TransformMatrix(
+            [1, 0, 0, vector.x],
+            [0, 1, 0, vector.y],
+            [0, 0, 1, vector.z],
+            [0, 0, 0, 1]
+        )
+    @staticmethod
+    def scale(amt):
+        if not isinstance(amt, Point):
+            amt = Point(amt, amt, amt)
+        return TransformMatrix(
+            [amt.x, 0, 0, 0],
+            [0, amt.y, 0, 0],
+            [0, 0, amt.z, 0],
+            [0, 0, 0, 1]
+        )
+
 class Shape:
     faces = None
     planes = None
-    def __init__(self, faces):
+    def __init__(self, name, faces):
+        self.name = name
         self.faces = faces
         self.planes = [f.plane() for f in self.faces]
+    def representativeFace(self):
+        """Return one face which will represent this particular symmetry
+        group.  Polyhedra with multiple symmetry groups will override
+        this method to define one Shape object for each symmetry group."""
+        return self.faces[0]
 
 class Dodecahedron(Shape):
     """A dodecahedron"""
@@ -248,9 +287,124 @@ class Dodecahedron(Shape):
         ] + [
             Face(*[-mkTop(4 - i) for i in xrange(0,5)])
         ]
-        Shape.__init__(self, [f*(diameter/4) for f in faces])
+        Shape.__init__(self, "Dodecahedron", [f*(diameter/4) for f in faces])
+
+def name_to_shape(str, diameter, default="dodecahedron"):
+    if str.lower() == 'dodecahedron':
+        return Dodecahedron(diameter)
+    # Default
+    return name_to_shape(default, diameter)
 
 ### Your main function subclasses the inkex.Effect class
+
+class LayerSettings:
+    effect = None
+    layer = None
+    metaLayer = None
+
+    origin = None
+    translation = Point(0, 0, 0)
+
+    shape = None
+    scaleFactor = 1
+
+    def __init__(self, effect, layer):
+        self.effect = effect
+        self.layer = layer
+        self.metaLayer = effect.ensure_layer(layer, 'Meta')
+        self.parse_meta()
+        self.parse_origin()
+
+    def toString(self, obj):
+        return json.dumps(obj, indent=2)
+
+    def fromString(self, str, default=None):
+        if str is None:
+            return default
+        try:
+            return json.loads(str)
+        except ValueError:
+            return default
+
+    def parse_meta(self):
+        DEFAULT_PLANE = {
+            'shape': 'dodecahedron',
+            'size': '3in',
+        }
+        # Look for the text element
+        els = self.metaLayer.xpath(
+            "./svg:text[@data-stellation]", namespaces=inkex.NSS
+        )
+        if len(els) > 0:
+            textEl = els[0]
+        else:
+            textEl = inkex.etree.SubElement(
+                self.metaLayer, inkex.addNS('text', 'svg'), {
+                inkex.addNS('label', 'inkscape'): 'Annotation',
+                'style': simplestyle.formatStyle({
+                    'font-size': '20px',
+                    'font-style': 'normal',
+                    'font-weight': 'normal',
+                    'fill': '#000',
+                    'font-family': 'sans-serif',
+                    'text-anchor': 'left',
+                    'text-align': 'left',
+                }),
+                'x': '0',
+                'y': '0',
+            })
+            textEl.text = self.toString(DEFAULT_PLANE)
+        newData = self.fromString(textEl.text, DEFAULT_PLANE)
+        oldData = self.fromString(textEl.get('data-stellation'), None)
+        newDiameter = self.effect.unittouu(
+            newData.get('size', DEFAULT_PLANE['size'])
+        )
+        self.shape = name_to_shape(
+            newData.get('shape', DEFAULT_PLANE['shape']), newDiameter
+        )
+        if oldData is not None and oldData.has_key('size'):
+            oldDiameter = self.effect.unittouu(oldData['size'])
+            # Rescale objects if size has changed
+            self.scaleFactor = newDiameter / oldDiameter
+        textEl.set('data-stellation', self.toString(newData))
+
+    def parse_origin(self):
+        # Look for the origin element
+        els = self.metaLayer.xpath(
+            "./svg:circle[@data-stellation]", namespaces=inkex.NSS
+        )
+        if len(els) > 0:
+            circle = els[0]
+        else:
+            docHeight = self.effect.unittouu(self.effect.getDocumentHeight())
+            docWidth = self.effect.unittouu(self.effect.getDocumentWidth())
+            circle = inkex.etree.SubElement(
+                self.metaLayer, inkex.addNS('circle','svg'), {
+                'style': simplestyle.formatStyle({
+                    'stroke': 'none',
+                    'fill': 'black',
+                }),
+                'cx': str(docWidth/2),
+                'cy': str(docHeight/2),
+                'r': str(self.effect.unittouu("3mm")),
+                inkex.addNS('label','inkscape'): 'Origin',
+            });
+        self.origin = Point(
+            float(circle.get('cx')),
+            float(circle.get('cy')),
+            0
+        )
+        prev = self.fromString(circle.get('data-stellation'))
+        if prev is not None:
+            oldOrigin = Point(float(prev.get('x', self.origin.x)),
+                              float(prev.get('y', self.origin.y)),
+                              0)
+            self.translation = self.origin - oldOrigin
+
+        circle.set('data-stellation', self.toString({
+            'x': self.origin.x,
+            'y': self.origin.y,
+        }))
 
 class StellationEffect(inkex.Effect):
 
@@ -261,60 +415,6 @@ class StellationEffect(inkex.Effect):
             '--add', action="store", type="inkbool", dest="add", default=False,
             help="Add a new plane"
         )
-
-        # Two ways to get debug info:
-        # OR just use inkex.debug(string) instead...
-        try:
-            self.tty = open("/dev/tty", 'w')
-        except:
-            self.tty = open(os.devnull, 'w')  # '/dev/null' for POSIX, 'nul' for Windows.
-            # print >>self.tty, "gears-dev " + __version__
-
-    def getUnittouu(self, param):
-        " for 0.48 and 0.91 compatibility "
-        try:
-            return inkex.unittouu(param)
-        except AttributeError:
-            return self.unittouu(param)
-
-    def getColorString(self, longColor, verbose=False):
-        """ Convert the long into a #RRGGBB color value
-            - verbose=true pops up value for us in defaults
-            conversion back is A + B*256^1 + G*256^2 + R*256^3
-        """
-        if verbose: inkex.debug("%s ="%(longColor))
-        longColor = long(longColor)
-        if longColor <0: longColor = long(longColor) & 0xFFFFFFFF
-        hexColor = hex(longColor)[2:-3]
-        hexColor = '#' + hexColor.rjust(6, '0').upper()
-        if verbose: inkex.debug("  %s for color default value"%(hexColor))
-        return hexColor
-    
-    def add_text(self, node, text, position, text_height=12):
-        """ Create and insert a single line of text into the svg under node.
-        """
-        line_style = {'font-size': '%dpx' % text_height, 'font-style':'normal', 'font-weight': 'normal',
-                     'fill': '#F6921E', 'font-family': 'Bitstream Vera Sans,sans-serif',
-                     'text-anchor': 'middle', 'text-align': 'center'}
-        line_attribs = {inkex.addNS('label','inkscape'): 'Annotation',
-                       'style': simplestyle.formatStyle(line_style),
-                       'x': str(position[0]),
-                       'y': str((position[1] + text_height) * 1.2)
-                       }
-        line = inkex.etree.SubElement(node, inkex.addNS('text','svg'), line_attribs)
-        line.text = text
-
-           
-    def calc_unit_factor(self):
-        """ return the scale factor for all dimension conversions.
-            - The document units are always irrelevant as
-              everything in inkscape is expected to be in 90dpi pixel units
-        """
-        # namedView = self.document.getroot().find(inkex.addNS('namedview', 'sodipodi'))
-        # doc_units = self.getUnittouu(str(1.0) + namedView.get(inkex.addNS('document-units', 'inkscape')))
-        unit_factor = self.getUnittouu(str(1.0) + self.options.units)
-        return unit_factor
-
 
 ### -------------------------------------------------------------------
 ### This is your main function and is called when the extension is run.
@@ -327,23 +427,52 @@ class StellationEffect(inkex.Effect):
             self.update_layer(layer)
 
     def update_layer(self, layer):
-        meta = self.ensure_layer(layer, 'Meta')
-        settings = self.parse_meta(meta)
+        settings = LayerSettings(self, layer)
+        self.update_layer_guidelines(settings)
+        self.update_layer_intersections(settings)
 
-        self.update_layer_guidelines(layer, settings)
-
-        self.update_layer_intersections(layer, settings)
-        pass
-
-    def update_layer_guidelines(self, layer, settings):
-        guidelines = self.ensure_layer(layer, 'Guidelines')
+    def update_layer_guidelines(self, settings):
+        guidelines = self.ensure_layer(settings.layer, 'Guidelines')
+        # save style from existing guidelines (if any)
+        els = guidelines.xpath("./svg:path", namespaces=inkex.NSS)
+        oldStyle = None if len(els) < 1 else els[0].get('style')
         # delete all existing guidelines
         self.delete_layer_contents(guidelines)
+        # transform from page space to layer origin
+        xform = TransformMatrix.translate(settings.origin)
         # compute new guidelines
-        pass
+        face = settings.shape.representativeFace()
+        path = ""
+        for plane in settings.shape.planes:
+            line = face.plane().intersect(plane)
+            if line is None: continue # parallel plane
+            # Compute points where this line intersects the page bounding planes
+            line = line.transform(xform)
+            pts = [line.intersect(p) for p in self.pagePlanes()]
+            # filter out points outside page face
+            pageFace = self.pageFace()
+            pts = [p for p in pts if
+                   p is not None and
+                   p.x + EPSILON >= pageFace.points[0].x and
+                   p.y + EPSILON >= pageFace.points[0].y and
+                   p.x - EPSILON <= pageFace.points[2].x and
+                   p.y - EPSILON <= pageFace.points[2].y]
+            if len(pts) == 0: continue # line outside of page bounds
+            assert len(pts) == 2
+            path += "M %f,%f L %f,%f " % (pts[0].x, pts[0].y, pts[1].x, pts[1].y)
+        inkex.etree.SubElement(guidelines, inkex.addNS('path', 'svg'),{
+            'd': path,
+            'style': simplestyle.formatStyle({
+                'opacity': 1,
+                'fill': 'none',
+                'stroke': '#000',
+                'stroke-width': 1,
+                'stroke-linecap': 'butt',
+            }) if oldStyle is None else oldStyle,
+        })
 
-    def update_layer_intersections(self, layer, settings):
-        intersections = self.ensure_layer(layer, 'Intersections')
+    def update_layer_intersections(self, settings):
+        intersections = self.ensure_layer(settings.layer, 'Intersections')
         # delete all existing intersections
         self.delete_layer_contents(intersections)
         # compute new intersections
@@ -357,48 +486,11 @@ class StellationEffect(inkex.Effect):
 
     def add_new_plane(self):
         svg = self.document.getroot()
-        layer = inkex.etree.SubElement(svg, inkex.addNS('g', 'svg'))
-        layer.set(inkex.addNS('label', 'inkscape'), 'Plane');
-        layer.set(inkex.addNS('groupmode', 'inkscape'), 'layer')
-        layer.set('data-stellation', 'plane')
-
-    def parse_meta(self, meta):
-        DEFAULT_PLANE = {
-            'type': 'dodecahedron',
-            'size': '5',
-            'units': 'inch',
-        }
-        # Look for the text element
-        els = meta.xpath("./svg:text[@data-stellation]", namespaces=inkex.NSS)
-        if len(els) > 0:
-            metaText = els[0].text
-            metaWas = els[0].get('data-stellation')
-        else:
-            metaText = json.dumps(DEFAULT_PLANE)
-            metaWas = None
-            el = inkex.etree.SubElement(meta, inkex.addNS('text', 'svg'), {
-                inkex.addNS('label', 'inkscape'): 'Annotation',
-                'data-stellation': '',
-                'style': simplestyle.formatStyle({
-                    'font-size': '20px',
-                    'font-style': 'normal',
-                    'font-weight': 'normal',
-                    'fill': '#000',
-                    'font-family': 'sans-serif',
-                    'text-anchor': 'left',
-                    'text-align': 'left',
-                }),
-                'x': '0',
-                'y': '0',
-            })
-            el.text = metaText
-        # parse metaText
-        newData = tolerant_json(metaText)
-        oldData = tolerant_json(metaWas)
-        inkex.debug(metaText)
-        # if metaWas != None and metaWas != "": rescale objects
-        meta.set('data-stellation', json.dumps(newData))
-        return newData
+        layer = inkex.etree.SubElement(svg, inkex.addNS('g', 'svg'), {
+            inkex.addNS('label', 'inkscape'): 'Plane',
+            inkex.addNS('groupmode', 'inkscape'): 'layer',
+            'data-stellation': 'plane',
+        })
 
     def stellation_layers(self):
         return self.document.xpath("//svg:svg/svg:g[@data-stellation='plane']", namespaces=inkex.NSS)
@@ -407,129 +499,36 @@ class StellationEffect(inkex.Effect):
         for g in parent.xpath('./svg:g', namespaces=inkex.NSS):
             if g.get(inkex.addNS('label', 'inkscape')) == name:
                 return g
-        layer = inkex.etree.SubElement(parent, 'g');
-        layer.set(inkex.addNS('label', 'inkscape'), name);
-        layer.set(inkex.addNS('groupmode', 'inkscape'), 'layer')
+        layer = inkex.etree.SubElement(parent, inkex.addNS('g', 'svg'), {
+            inkex.addNS('label', 'inkscape'): name,
+            inkex.addNS('groupmode', 'inkscape'): 'layer',
+        })
         if locked:
             layer.set(inkex.addNS('insensitive', 'sodipodi'), 'true')
         return layer
 
-    def old_effect(self):
-        """ Calculate Gear factors from inputs.
-            - Make list of radii, angles, and centers for each tooth and 
-              iterate through them
-            - Turn on other visual features e.g. cross, rack, annotations, etc
-        """
-        
-        # check for correct number of selected objects and return a translatable errormessage to the user
-        if len(self.options.ids) != 2:
-            inkex.errormsg(_("This extension requires two selected objects."))
-            exit()
-        # Convert color - which comes in as a long into a string like '#FFFFFF'
-        self.options.strokeColour = self.getColorString(self.options.strokeColour)
-        #
-        path_stroke = self.options.strokeColour  # take color from tab3
-        path_fill   = 'none'     # no fill - just a line
-        path_stroke_width  = 0.6 # can also be in form '0.6mm'
-        # gather incoming params and convert
-        param1 = self.options.param1
-        param2 = self.options.param2
-        param3 = self.options.param3
-        choice = self.options.achoice
-        units2 = self.options.units2
-        accuracy = self.options.accuracy # although a string in inx - option parser converts to int.
-        # calculate unit factor for units defined in dialog. 
-        unit_factor = self.calc_unit_factor()
-        # what page are we on
-        page_id = self.options.active_tab # sometimes wrong the very first time
-
-        # Do your thing - create some points or a path or whatever...
-        points = []
-        points.extend( [ (i*2,i*2) for i in range(0, param1) ])
-        points.append((param1, param1*2+5))
-        #inkex.debug(points)
-        path = points_to_svgd( points )
-        #inkex.debug(path)
-        bbox_center = points_to_bbox_center( points )
-        # example debug
-        # print >>self.tty, bbox_center
-        # or
-        # inkex.debug("bbox center %s" % bbox_center)
-
-        
-        # Embed the path in a group to make animation easier:
-        # Be sure to examine the internal structure by looking in the xml editor inside inkscape
-        # This finds center of exisiting document page
-        
-        # This finds center of current view in inkscape
-        t = 'translate(%s,%s)' % (self.view_center[0], self.view_center[1] )
-        # Make a nice useful name
-        g_attribs = { inkex.addNS('label','inkscape'): 'useful name' + str( param1 ),
-                      inkex.addNS('transform-center-x','inkscape'): str(-bbox_center[0]),
-                      inkex.addNS('transform-center-y','inkscape'): str(-bbox_center[1]),
-                      'transform': t,
-                      'info':'N: '+str(param1)+'; with:'+ str(param2) }
-        # add the group to the document's current layer
-        topgroup = inkex.etree.SubElement(self.current_layer, 'g', g_attribs )
-
-        # Create SVG Path under this top level group
-        # define style using basic dictionary
-        style = { 'stroke': path_stroke, 'fill': path_fill, 'stroke-width': param2 }
-        # convert style into svg form (see import at top of file)
-        mypath_attribs = { 'style': simplestyle.formatStyle(style), 'd': path }
-        # add path to scene
-        squiggle = inkex.etree.SubElement(topgroup, inkex.addNS('path','svg'), mypath_attribs )
-
-
-        # Add another feature in same group (under it)
-        style = { 'stroke': path_stroke, 'fill': path_fill, 'stroke-width': path_stroke_width }
-        cs = param1 / 2 # centercross length
-        cs2 = str(cs)
-        d = 'M-'+cs2+',0L'+cs2+',0M0,-'+cs2+'L0,'+cs2  # 'M-10,0L10,0M0,-10L0,10'
-        # or
-        d = 'M %s,0 L %s,0 M 0,-%s L 0,%s' % (-cs, cs, cs,cs)
-        # or
-        d = 'M {0},0 L {1},0 M 0,{0} L 0,{1}'.format(-cs,cs)
-        # or
-        #d = 'M-10 0L10 0M0 -10L0 10' # commas superfluous, minimise spaces.
-        cross_attribs = { inkex.addNS('label','inkscape'): 'Center cross',
-                          'style': simplestyle.formatStyle(style), 'd': d }
-        cross = inkex.etree.SubElement(topgroup, inkex.addNS('path','svg'), cross_attribs )
-
-
-        # Add a precalculated svg circle
-        style = { 'stroke': path_stroke, 'fill': path_fill, 'stroke-width': self.getUnittouu(str(param2) +self.options.units) }
-        draw_SVG_circle(topgroup, param1*4*unit_factor, 0, 0, 'a circle', style)
-
-
-        # Add some super basic text (e.g. for debug)
-        if choice:
-            notes = ['a label: %d (%s) ' % (param1*unit_factor, self.options.units),
-                     'doc line'
-                     ]
-            text_height = 12
-            # position above
-            y = - 22
-            for note in notes:
-                self.add_text(topgroup, note, [0,y], text_height)
-                y += text_height * 1.2
-        #
-        #more complex text
-        font_height = min(32, max( 10, int(self.getUnittouu(str(param1) + self.options.units))))
-        text_style = { 'font-size': str(font_height),
-                       'font-family': 'arial',
-                       'text-anchor': 'middle',
-                       'text-align': 'center',
-                       'fill': path_stroke }
-        text_atts = {'style':simplestyle.formatStyle(text_style),
-                     'x': str(44),
-                     'y': str(-15) }
-        text = inkex.etree.SubElement(topgroup, 'text', text_atts)
-        text.text = "%4.3f" %(param1*param2)
+    def pageFace(self):
+        """Return a face representing the document."""
+        viewbox = [
+            float(s) for s in self.document.getroot().get('viewBox').split()
+        ]
+        return Face(
+            Point(viewbox[0],viewbox[1],0),
+            Point(viewbox[2],viewbox[1],0),
+            Point(viewbox[2],viewbox[3],0),
+            Point(viewbox[0],viewbox[3],0),
+            inside=Point(0,0,-1)
+        )
+    def pagePlanes(self):
+        """Return four planes representing the edges of the document."""
+        pageFace = self.pageFace()
+        return [
+            Plane(pageFace.points[0], Vector( 0,-1, 0)),
+            Plane(pageFace.points[0], Vector(-1, 0, 0)),
+            Plane(pageFace.points[2], Vector( 0, 1, 0)),
+            Plane(pageFace.points[2], Vector( 1, 0, 0)),
+        ]
 
 if __name__ == '__main__':
     e = StellationEffect()
     e.affect()
-
-# Notes
-
