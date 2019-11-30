@@ -8,6 +8,7 @@ Stellation extension for Inkscape.
 
 import inkex       # Required
 import simplestyle # will be needed here for styles support
+import simpletransform
 import os          # here for alternative debug method only - so not usually required
 import json
 # many other useful ones in extensions folder. E.g. simplepath, cubicsuperpath, ...
@@ -107,7 +108,7 @@ class Point:
         )
     def dot(self, other):
         return (self.x * other.x) + (self.y * other.y) + (self.z * other.z)
-    def normalize(self):
+    def normalized(self):
         return self / self.dist()
     def transform(self, matrix):
         return matrix.transform(self)
@@ -158,7 +159,7 @@ class Line:
     direction = None
     def __init__(self, point, direction):
         self.point = point
-        self.direction = direction.normalize()
+        self.direction = direction.normalized()
     def __repr__(self):
         return "Line(%r,%r)" % (self.point, self.direction)
     def intersect(self, other):
@@ -180,7 +181,7 @@ class Plane:
         self.point = point
         # Unit normal vector; also the direction cosines of the angle n
         # makes with the xyz-axes
-        self.normal = normal.normalize()
+        self.normal = normal.normalized()
     def __repr__(self):
         return "Plane(%r,%r)" % (self.point, self.normal)
     def d(self):
@@ -236,6 +237,24 @@ class TransformMatrix:
     def transform(self, point):
         m = self * TransformMatrix([point.x],[point.y],[point.z],[1])
         return Point(m.rows[0][0], m.rows[1][0], m.rows[2][0])
+    def toSVG(self):
+        # The simpletransform.py code represents 2d affine matrices by
+        # omitting the final [0,0,1] row
+        return [
+            [self.rows[0][0], self.rows[0][1], self.rows[0][3]],
+            [self.rows[1][0], self.rows[1][1], self.rows[1][3]],
+        ]
+    @staticmethod
+    def fromSVG(self, mat):
+        return TransformMatrix(
+            [mat[0][0], mat[0][1], 0, mat[0][2]],
+            [mat[1][0], mat[1][1], 0, mat[1][2]],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        )
+    @staticmethod
+    def identity():
+        return TransformMatrix.translate(Point(0,0,0))
 
     @staticmethod
     def translate(vector):
@@ -255,6 +274,17 @@ class TransformMatrix:
             [0, 0, amt.z, 0],
             [0, 0, 0, 1]
         )
+    @staticmethod
+    def rotateAxis(axis, angle=None, sin=None, cos=None):
+        s = sin(angle) if sin is None else sin
+        c = cos(angle) if cos is None else cos
+        x, y, z = axis.x, axis.y, axis.z
+        return TransformMatrix(
+            [c+x*x*(1-c), x*y*(1-c) - z*s, x*z*(1-c)+y*s, 0],
+            [y*x*(1-c)+z*s, c+y*y*(1-c), y*z*(1-c) - x*s, 0],
+            [z*x*(1-c)+y*s, z*y*(1-c) + x*s, c+z*z*(1-c), 0],
+            [0, 0, 0, 1]
+        )
 
 class Shape:
     faces = None
@@ -268,9 +298,27 @@ class Shape:
         group.  Polyhedra with multiple symmetry groups will override
         this method to define one Shape object for each symmetry group."""
         return self.faces[0]
+    @staticmethod
+    def faceTransform(face1, face2):
+        """Transform from face1 to face2"""
+        return Shape.planeTransform(face1.plane(), face2.plane())
+    @staticmethod
+    def planeTransform(plane1, plane2):
+        # if the planes are different distances from the origin we may need
+        # to scale or translate at the end
+        assert abs(plane1.d() - plane2.d()) < EPSILON
+        axis = plane1.normal.cross(plane2.normal)
+        if axis.dist() < EPSILON: # no rotation necessary
+            m = TransformMatrix.identity()
+        else:
+            axis = axis.normalized()
+            rotCos = plane1.normal.dot(plane2.normal)
+            rotSin = sqrt(1-(rotCos*rotCos))
+            m = TransformMatrix.rotateAxis(axis, sin=rotSin, cos=rotCos)
+        return m
 
 class Dodecahedron(Shape):
-    """A dodecahedron"""
+    """A dodecahedron."""
     def __init__(self, diameter=1):
         def mkTop(i):
             i = i % 5
@@ -289,9 +337,32 @@ class Dodecahedron(Shape):
         ]
         Shape.__init__(self, "Dodecahedron", [f*(diameter/4) for f in faces])
 
+class Icosahedron(Shape):
+    """An icosahedron."""
+    def __init__(self, diameter=1):
+        peaks = [Point(0,0,1), Point(0,0,-1)]
+        r = (2/5)*sqrt(5)
+        h = (1/5)*sqrt(5)
+        top = [Point(r*cos(2*pi*i/5), r*sin(2*pi*i/5), h) for i in xrange(6)]
+        bot = [Point(r*cos(2*pi*(i+.5)/5), r*sin(2*pi*(i+.5)/5), -h) for i in xrange(6)]
+        faces = [
+            Face(peaks[0], top[i], top[i+1]) for i in xrange(0,5)
+        ] + [
+            Face(top[i], bot[i], top[i+1]) for i in xrange(0,5)
+        ] + [
+            Face(bot[i+1], top[i+1], bot[i]) for i in xrange(0,5)
+        ] + [
+            Face(peaks[1], bot[i+1], bot[i]) for i in xrange(0,5)
+        ]
+        Shape.__init__(self, "Icosahedron", [f*(diameter/2) for f in faces])
+    def representativeFace(self):
+        return self.faces[7]
+
 def name_to_shape(str, diameter, default="dodecahedron"):
     if str.lower() == 'dodecahedron':
         return Dodecahedron(diameter)
+    if str.lower() == 'icosahedron':
+        return Icosahedron(diameter)
     # Default
     return name_to_shape(default, diameter)
 
@@ -307,6 +378,7 @@ class LayerSettings:
 
     shape = None
     scaleFactor = 1
+    symmetry = 1
 
     def __init__(self, effect, layer):
         self.effect = effect
@@ -330,6 +402,9 @@ class LayerSettings:
         DEFAULT_PLANE = {
             'shape': 'dodecahedron',
             'size': '3in',
+            'symmetry': '1',
+            'frontThick': '.125in',
+            'backThick': '0',
         }
         # Look for the text element
         els = self.metaLayer.xpath(
@@ -366,6 +441,8 @@ class LayerSettings:
             oldDiameter = self.effect.unittouu(oldData['size'])
             # Rescale objects if size has changed
             self.scaleFactor = newDiameter / oldDiameter
+        if newData.get('symmetry') is not None:
+            self.symmetry = int(newData['symmetry'])
         textEl.set('data-stellation', self.toString(newData))
 
     def parse_origin(self):
@@ -428,8 +505,20 @@ class StellationEffect(inkex.Effect):
 
     def update_layer(self, layer):
         settings = LayerSettings(self, layer)
+        self.update_layer_xform(settings)
         self.update_layer_guidelines(settings)
+        self.update_layer_symmetry(settings)
         self.update_layer_intersections(settings)
+
+    def update_layer_xform(self, settings):
+        scale = (
+            TransformMatrix.translate(settings.origin) *
+            TransformMatrix.scale(settings.scaleFactor) *
+            TransformMatrix.translate(-settings.origin)
+        )
+        mat = (scale * TransformMatrix.translate(settings.translation)).toSVG()
+        for node in self.layer_contents(settings.layer):
+            simpletransform.applyTransformToNode(mat, node)
 
     def update_layer_guidelines(self, settings):
         guidelines = self.ensure_layer(settings.layer, 'Guidelines')
@@ -442,6 +531,11 @@ class StellationEffect(inkex.Effect):
         xform = TransformMatrix.translate(settings.origin)
         # compute new guidelines
         face = settings.shape.representativeFace()
+        xform = xform * Shape.planeTransform(
+            face.plane(),
+            Plane(Point(0,0,face.centroid().dist()),
+                  Point(0,0,1))
+        )
         path = ""
         for plane in settings.shape.planes:
             line = face.plane().intersect(plane)
@@ -471,6 +565,28 @@ class StellationEffect(inkex.Effect):
             }) if oldStyle is None else oldStyle,
         })
 
+    def update_layer_symmetry(self, settings):
+        symmetry = self.ensure_layer(settings.layer, 'Symmetry')
+        # delete all existing stuff
+        self.delete_layer_contents(symmetry)
+        for i in xrange(settings.symmetry - 1):
+            g = inkex.etree.SubElement(symmetry, inkex.addNS('g', 'svg'), {
+                'transform':'rotate(%f %f %f)' % (
+                    360*(i+1)/settings.symmetry,
+                    settings.origin.x,
+                    settings.origin.y,
+                )
+            })
+            for node in self.layer_contents(settings.layer):
+                id = node.get('id')
+                if id is None:
+                    # ensure there's an id
+                    id = self.uniqueId('stella');
+                    node.set('id', id)
+                inkex.etree.SubElement(g, inkex.addNS('use', 'svg'), {
+                    inkex.addNS('href','xlink'): '#' + id,
+                })
+
     def update_layer_intersections(self, settings):
         intersections = self.ensure_layer(settings.layer, 'Intersections')
         # delete all existing intersections
@@ -483,6 +599,12 @@ class StellationEffect(inkex.Effect):
         layer.clear()
         for key, value in attribs:
             layer.set(key, value)
+
+    def layer_contents(self, layer):
+        for child in layer:
+            if child.get(inkex.addNS('groupmode', 'inkscape')) == 'layer':
+                continue
+            yield child
 
     def add_new_plane(self):
         svg = self.document.getroot()
