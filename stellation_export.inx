@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<inkscape-extension xmlns="http://www.inkscape.org/namespace/inkscape/extension">
+    <_name>Export OpenSCAD</_name>
+    <id>net.cscott.inkscape.stellation.export</id>
+    <dependency type="executable" location="extensions">inkscape-stellation/stellation.py</dependency>
+    <param name="output" type="string" _gui-text="OpenSCAD output file">~/inkscape.scad</param>
+
+    <effect needs-live-preview="false">
+        <object-type>all</object-type>
+        <effects-menu _name="Export">
+            <submenu _name="Stellation" />
+        </effects-menu>
+    </effect>
+    <script>
+        <command reldir="extensions" interpreter="python">inkscape-stellation/stellation.py</command>
+    </script>
+</inkscape-extension>

@@ -9,13 +9,17 @@ Stellation extension for Inkscape.
 import inkex       # Required
 import simplestyle # will be needed here for styles support
 import simpletransform
+import cubicsuperpath
+import cspsubdiv
 import os          # here for alternative debug method only - so not usually required
 import json
 # many other useful ones in extensions folder. E.g. simplepath, cubicsuperpath, ...
 
+import math
 from math import cos, sin, radians, sqrt, pi
 phi = (1+sqrt(5))/2
 EPSILON = .00001 # arbitrary small #
+FLATNESS = 0.5 # minimum flatness of subdivided curves
 
 __version__ = '0.0.0'
 
@@ -62,6 +66,10 @@ def ccw_from_origin(a, b, c, V = None):
 def normal(a, b, c):
     return (b - a).cross(c - a)
 
+def safe_sqrt(x):
+    if x < 0 and x >= -EPSILON: return 0
+    return sqrt(x)
+
 class Point:
     """Points are three dimensional."""
     x = 0
@@ -96,7 +104,7 @@ class Point:
         self.z /= other
         return self
     def dist(self, other=None):
-        return sqrt(self.dist2(other))
+        return safe_sqrt(self.dist2(other))
     def dist2(self, other=None):
         pt = self if other is None else (self - other)
         return (pt.x*pt.x + pt.y*pt.y + pt.z*pt.z)
@@ -187,6 +195,11 @@ class Plane:
     def d(self):
         """Perpendicular distance from the origin to the plane."""
         return -(self.normal.dot(self.point))
+    def arbitrary_point(self):
+        # nonzero vector parallel to the plane
+        u = Vector(1,0,0) if abs(self.normal.x) < EPSILON and abs(self.normal.y) < EPSILON \
+            else Vector(-self.normal.y, self.normal.x, 0)
+        return self.point + u
     def transform(self, matrix):
         p1 = self.point.transform(matrix)
         p2 = (self.point + self.normal).transform(matrix)
@@ -219,6 +232,10 @@ class TransformMatrix:
     rows = None
     def __init__(self, *rows):
         self.rows = rows
+    def toOpenSCAD(self):
+        return "[" + ",".join(
+            ("[" + ",".join(repr(f) for f in row) + "]") for row in self.rows
+        ) + "]"
     def __repr__(self):
         return "TransformMatrix(" + ",".join(repr(r) for r in self.rows) + ")"
     def __mul__(self, other):
@@ -245,7 +262,7 @@ class TransformMatrix:
             [self.rows[1][0], self.rows[1][1], self.rows[1][3]],
         ]
     @staticmethod
-    def fromSVG(self, mat):
+    def fromSVG(mat):
         return TransformMatrix(
             [mat[0][0], mat[0][1], 0, mat[0][2]],
             [mat[1][0], mat[1][1], 0, mat[1][2]],
@@ -276,13 +293,17 @@ class TransformMatrix:
         )
     @staticmethod
     def rotateAxis(axis, angle=None, sin=None, cos=None):
-        s = sin(angle) if sin is None else sin
-        c = cos(angle) if cos is None else cos
+        c = math.cos(angle) if cos is None else cos
+        s = (safe_sqrt(1-c*c) if angle is None else math.sin(angle)) \
+            if sin is None else sin
+        # we don't need information about the sign of s if it is
+        # implicit in the direction of 'axis'
         x, y, z = axis.x, axis.y, axis.z
+        C = 1 - c
         return TransformMatrix(
-            [c+x*x*(1-c), x*y*(1-c) - z*s, x*z*(1-c)+y*s, 0],
-            [y*x*(1-c)+z*s, c+y*y*(1-c), y*z*(1-c) - x*s, 0],
-            [z*x*(1-c)+y*s, z*y*(1-c) + x*s, c+z*z*(1-c), 0],
+            [c + x*x*C, x*y*C - z*s, x*z*C + y*s, 0],
+            [y*x*C + z*s, c + y*y*C, y*z*C - x*s, 0],
+            [z*x*C - y*s, z*y*C + x*s, c + z*z*C, 0],
             [0, 0, 0, 1]
         )
 
@@ -301,21 +322,26 @@ class Shape:
     @staticmethod
     def faceTransform(face1, face2):
         """Transform from face1 to face2"""
-        return Shape.planeTransform(face1.plane(), face2.plane())
+        # First transform to the right plane
+        xform = Shape.planeTransform(face1.plane(), face2.plane())
+        # Now rotate so the first points in the face correspond
+        p1, p2 = face1.points[0].transform(xform), face2.points[0]
+        center = face2.centroid()
+        p1v, p2v = (p1-center).normalized(), (p2-center).normalized()
+        rotCos = p1v.dot(p2v)
+        return TransformMatrix.rotateAxis(center.normalized(), cos=rotCos) \
+            * xform
     @staticmethod
     def planeTransform(plane1, plane2):
         # if the planes are different distances from the origin we may need
         # to scale or translate at the end
         assert abs(plane1.d() - plane2.d()) < EPSILON
         axis = plane1.normal.cross(plane2.normal)
-        if axis.dist() < EPSILON: # no rotation necessary
-            m = TransformMatrix.identity()
-        else:
-            axis = axis.normalized()
-            rotCos = plane1.normal.dot(plane2.normal)
-            rotSin = sqrt(1-(rotCos*rotCos))
-            m = TransformMatrix.rotateAxis(axis, sin=rotSin, cos=rotCos)
-        return m
+        if axis.dist() < EPSILON: # planes are parallel
+            axis = (plane1.arbitrary_point() - plane1.point)
+        axis = axis.normalized()
+        rotCos = plane1.normal.dot(plane2.normal)
+        return TransformMatrix.rotateAxis(axis, cos=rotCos)
 
 class Dodecahedron(Shape):
     """A dodecahedron."""
@@ -372,6 +398,7 @@ class LayerSettings:
     effect = None
     layer = None
     metaLayer = None
+    markingsLayer = None
 
     origin = None
     translation = Point(0, 0, 0)
@@ -380,10 +407,14 @@ class LayerSettings:
     scaleFactor = 1
     symmetry = 1
 
+    frontThick = None
+    backThick = None
+
     def __init__(self, effect, layer):
         self.effect = effect
         self.layer = layer
         self.metaLayer = effect.ensure_layer(layer, 'Meta')
+        self.markingsLayer = effect.ensure_layer(layer, 'Markings', locked=False)
         self.parse_meta()
         self.parse_origin()
 
@@ -443,6 +474,8 @@ class LayerSettings:
             self.scaleFactor = newDiameter / oldDiameter
         if newData.get('symmetry') is not None:
             self.symmetry = int(newData['symmetry'])
+        self.frontThick = self.effect.unittouu(newData.get('frontThick', '3mm'))
+        self.backThick = self.effect.unittouu(newData.get('backThick', '0'))
         textEl.set('data-stellation', self.toString(newData))
 
     def parse_origin(self):
@@ -492,23 +525,33 @@ class StellationEffect(inkex.Effect):
             '--add', action="store", type="inkbool", dest="add", default=False,
             help="Add a new plane"
         )
+        self.OptionParser.add_option(
+            '--output', action="store", type="string", dest="output", default=None,
+            help="Export OpenSCAD file"
+        )
 
 ### -------------------------------------------------------------------
 ### This is your main function and is called when the extension is run.
 
     def effect(self):
-        #self.ensure_base()
+        output = open(
+            os.path.expanduser( self.options.output ).replace('/', os.sep),
+            'w'
+        ) if self.options.output else None
+
         if self.options.add:
             self.add_new_plane()
         for layer in self.stellation_layers():
-            self.update_layer(layer)
+            self.update_layer(layer, output=output)
 
-    def update_layer(self, layer):
+    def update_layer(self, layer, output=None):
         settings = LayerSettings(self, layer)
         self.update_layer_xform(settings)
         self.update_layer_guidelines(settings)
         self.update_layer_symmetry(settings)
         self.update_layer_intersections(settings)
+        if output is not None:
+            self.openscadLayer(settings, output)
 
     def update_layer_xform(self, settings):
         scale = (
@@ -517,8 +560,9 @@ class StellationEffect(inkex.Effect):
             TransformMatrix.translate(-settings.origin)
         )
         mat = (scale * TransformMatrix.translate(settings.translation)).toSVG()
-        for node in self.layer_contents(settings.layer):
-            simpletransform.applyTransformToNode(mat, node)
+        for layer in [settings.markingsLayer, settings.layer]:
+            for node in self.layer_contents(layer):
+                simpletransform.applyTransformToNode(mat, node)
 
     def update_layer_guidelines(self, settings):
         guidelines = self.ensure_layer(settings.layer, 'Guidelines')
@@ -577,15 +621,16 @@ class StellationEffect(inkex.Effect):
                     settings.origin.y,
                 )
             })
-            for node in self.layer_contents(settings.layer):
-                id = node.get('id')
-                if id is None:
-                    # ensure there's an id
-                    id = self.uniqueId('stella');
-                    node.set('id', id)
-                inkex.etree.SubElement(g, inkex.addNS('use', 'svg'), {
-                    inkex.addNS('href','xlink'): '#' + id,
-                })
+            for layer in [settings.markingsLayer, settings.layer]:
+                for node in self.layer_contents(layer):
+                    id = node.get('id')
+                    if id is None:
+                        # ensure there's an id
+                        id = self.uniqueId('stella');
+                        node.set('id', id)
+                    inkex.etree.SubElement(g, inkex.addNS('use', 'svg'), {
+                        inkex.addNS('href','xlink'): '#' + id,
+                    })
 
     def update_layer_intersections(self, settings):
         intersections = self.ensure_layer(settings.layer, 'Intersections')
@@ -641,6 +686,7 @@ class StellationEffect(inkex.Effect):
             Point(viewbox[0],viewbox[3],0),
             inside=Point(0,0,-1)
         )
+
     def pagePlanes(self):
         """Return four planes representing the edges of the document."""
         pageFace = self.pageFace()
@@ -650,6 +696,68 @@ class StellationEffect(inkex.Effect):
             Plane(pageFace.points[2], Vector( 0, 1, 0)),
             Plane(pageFace.points[2], Vector( 1, 0, 0)),
         ]
+
+    def openscadLayer(self, settings, f):
+        def mm(val):
+            if isinstance(val, Point):
+                return Point(mm(val.x), mm(val.y), mm(val.z))
+            return self.uutounit(val, "mm")
+        face = settings.shape.representativeFace()
+        # XXX This should actually be the inverse transform of the
+        # plane transform with the arguments in the opposite order
+        # (to undo the transformation which makes the stellation).
+        # Does it matter?
+        xform = Shape.planeTransform(
+            Plane(Point(0,0,face.centroid().dist()), Point(0,0,1)),
+            face.plane()
+        )
+        f.write( 'module layer_%s() {\n' % settings.layer.get('id') )
+        f.write( '  translate([0,0,%f])\n' % face.centroid().dist())
+        f.write( '  for (i=[0:%d]) rotate(i*360/%d)\n' % (settings.symmetry-1, settings.symmetry))
+        f.write( '  scale([1,-1,1])\n' ) # SVG y axis is flipped
+        f.write( '  translate([0,0,%f]) linear_extrude(height=%f)\n' %
+                 ( -mm(settings.backThick),
+                   mm(settings.frontThick+settings.backThick) ) )
+        points = []
+        pointMap = {}
+        def pointToIdx(x, y):
+            key = repr((x,y))
+            if not pointMap.has_key(key):
+                pointMap[key] = len(points)
+                points.append(mm(Point(x,y,0).transform(xform)-settings.origin))
+            return pointMap[key]
+        paths = []
+        for node in self.layer_contents(settings.layer):
+            # emit openscad polygon
+            if node.tag == inkex.addNS('path','svg'):
+                xform = TransformMatrix.fromSVG(
+                    simpletransform.parseTransform(node.get('transform'))
+                )
+                d = node.get('d')
+                p = cubicsuperpath.parsePath(d)
+                cspsubdiv.cspsubdiv(p, FLATNESS)
+                thisPath = []
+                for sp in p:
+                    for csp in sp:
+                        idx = pointToIdx(csp[1][0],csp[1][1])
+                        thisPath.append(idx)
+                    paths.append(thisPath)
+            # XXX we should probably parse g, circle, rect, etc
+        f.write('    polygon(points=[%s], paths=[%s]);\n' %
+                (",".join(("[%f,%f]" % (p.x, p.y)) for p in points),
+                 ",".join(
+                     ("[" + ",".join(("%d" % i) for i in subpath) + "]") for
+                     subpath in paths
+                     )))
+        f.write( '}\n' )
+        f.write( 'for (m=[\n' )
+        f.write('  ' + ',\n  '.join(
+            Shape.faceTransform(settings.shape.representativeFace(), face)
+            .toOpenSCAD()
+            for face in settings.shape.faces
+        ) + '])\n')
+        f.write( '  multmatrix(m=m)\n')
+        f.write( '  layer_%s();\n' % settings.layer.get('id') )
 
 if __name__ == '__main__':
     e = StellationEffect()
