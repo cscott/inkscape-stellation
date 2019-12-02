@@ -19,7 +19,7 @@ import math
 from math import cos, sin, radians, sqrt, pi
 phi = (1+sqrt(5))/2
 EPSILON = .00001 # arbitrary small #
-FLATNESS = 0.5 # minimum flatness of subdivided curves
+FLATNESS = 0.25 # minimum flatness of subdivided curves
 
 __version__ = '0.0.0'
 
@@ -357,8 +357,11 @@ class Shape:
         p1, p2 = face1.points[0].transform(xform), face2.points[0]
         center = face2.centroid()
         p1v, p2v = (p1-center).normalized(), (p2-center).normalized()
+        axis = p1v.cross(p2v) # this is `center`, but maybe w/ opposite sign
+        if near_zero(axis.dist()): axis = center
+        axis = axis.normalized()
         rotCos = p1v.dot(p2v)
-        return TransformMatrix.rotateAxis(center.normalized(), cos=rotCos) \
+        return TransformMatrix.rotateAxis(axis, cos=rotCos) \
             * xform
     @staticmethod
     def planeTransform(plane1, plane2):
@@ -410,8 +413,6 @@ class Icosahedron(Shape):
             Face(peaks[1], bot[i+1], bot[i]) for i in xrange(0,5)
         ]
         Shape.__init__(self, "Icosahedron", [f*(diameter/2) for f in faces])
-    def representativeFace(self):
-        return self.faces[7]
 
 def name_to_shape(str, diameter, default="dodecahedron"):
     if str.lower() == 'dodecahedron':
@@ -438,6 +439,7 @@ class LayerSettings:
     translation = Point(0, 0, 0)
     scaleFactor = 1
 
+    pageFace = None # used to establish rotation to page
     pageToShapeXform = None
     shapeToPageXform = None
 
@@ -450,20 +452,22 @@ class LayerSettings:
         self.parse_origin()
         face = self.shape.representativeFace()
         zheight = face.centroid().dist()
+        self.pageFace = Face(
+            Point(0, 1,zheight),
+            Point(-1,0,zheight),
+            Point(0,-1,zheight),
+            Point( 1,0,zheight)
+        )
         self.pageToShapeXform = (
-            Shape.planeTransform(
-                Plane(Point(0,0,zheight), Point(0,0,1)),
-                face.plane()) *
+            Shape.faceTransform(self.pageFace, face) *
             TransformMatrix.scale(Point(1,-1,1)) *
-            TransformMatrix.translate(-self.origin + Point(0,0,zheight)))
+            TransformMatrix.translate(-self.origin + self.pageFace.centroid()))
         # XXX in theory this should just be a matrix inverse
         self.shapeToPageXform = (
-            TransformMatrix.translate(self.origin - Point(0,0,zheight)) *
+            TransformMatrix.translate(self.origin - self.pageFace.centroid()) *
             TransformMatrix.scale(Point(1,-1,1)) *
-            Shape.planeTransform(
-                face.plane(),
-                Plane(Point(0,0,zheight), Point(0,0,1))
-            ))
+            Shape.faceTransform(face, self.pageFace)
+            )
 
     def toString(self, obj):
         return json.dumps(obj, indent=2)
@@ -708,16 +712,22 @@ class StellationEffect(inkex.Effect):
                         paths.append(thisPath)
         # compute new intersections
         face = settings.shape.representativeFace()
-        d = ""
-        for other_face in settings.shape.faces:
+        d1,d2 = "",""
+        for other_face,scootch in \
+            [(f,s) for f in settings.shape.faces for s in [1,-1]]:
             line = face.plane().intersect(other_face.plane())
             if line is None: continue # parallel plane
             # Compute points where this line intersects the figure
             other_line = line.transform(
+                settings.shapeToPageXform *
                 Shape.faceTransform(other_face, face)
-            ).transform(
-                settings.shapeToPageXform
             )
+            # tweak this line just a scootch toward/away from the origin
+            # we'll use opacity so these overlapped regions show up nice
+            other_line = Line(other_line.point +
+                              (other_line.point - settings.origin) *
+                              self.unittouu(".01mm") * scootch,
+                              other_line.direction)
             intersections = []
             for path in paths:
                 for i in xrange(len(path)-1):
@@ -731,21 +741,46 @@ class StellationEffect(inkex.Effect):
             # XXX should make the thicknesses match
             intersections = [pt.transform(settings.shapeToPageXform)
                              for pt in intersections]
+            # XXX this is projection, but should really widen to account for
+            # angle
+            front = (line.point + other_face.plane().normal).transform(
+                settings.shapeToPageXform
+            ) - line.point.transform(settings.shapeToPageXform)
+            front = Point(front.x, front.y, 0).normalized()
+
             for i in xrange(0, len(intersections), 2):
-                d += "M %f,%f L %f,%f " % (
-                    intersections[i].x,
-                    intersections[i].y,
-                    intersections[i+1].x,
-                    intersections[i+1].y,
+                s,e = intersections[i], intersections[i+1]
+                p0 = s + front*settings.frontThick
+                p1 = e + front*settings.frontThick
+                p2 = e - front*settings.backThick
+                p3 = s - front*settings.backThick
+                dd = "M %f,%f L %f,%f L %f,%f L %f,%f Z " % (
+                    p0.x, p0.y,
+                    p1.x, p1.y,
+                    p2.x, p2.y,
+                    p3.x, p3.y,
                 )
+                if scootch > 0:
+                    d1 += dd
+                else:
+                    d2 += dd
+        oldStyle = None
         inkex.etree.SubElement(intersectionLayer, inkex.addNS('path', 'svg'), {
-            'd': d,
+            'd': d1,
             'style': simplestyle.formatStyle({
-                'opacity': 1,
-                'fill': 'none',
-                'stroke': 'blue',
+                'opacity': 0.5,
+                'fill': 'blue',
+                'stroke': 'none',
                 'stroke-width': 2,
-                'stroke-linecap': 'butt',
+            }) if oldStyle is None else oldStyle,
+        })
+        inkex.etree.SubElement(intersectionLayer, inkex.addNS('path', 'svg'), {
+            'd': d2,
+            'style': simplestyle.formatStyle({
+                'opacity': 0.5,
+                'fill': 'blue',
+                'stroke': 'none',
+                'stroke-width': 2,
             }) if oldStyle is None else oldStyle,
         })
 
