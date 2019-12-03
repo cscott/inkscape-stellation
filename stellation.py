@@ -20,6 +20,7 @@ from math import cos, sin, radians, sqrt, pi
 phi = (1+sqrt(5))/2
 EPSILON = .00001 # arbitrary small #
 FLATNESS = 0.25 # minimum flatness of subdivided curves
+SCOOTCH = '.001mm' # "scootch" amount
 
 __version__ = '0.0.0'
 
@@ -414,11 +415,35 @@ class Icosahedron(Shape):
         ]
         Shape.__init__(self, "Icosahedron", [f*(diameter/2) for f in faces])
 
+class RhombicDodecahedron(Shape):
+    """A rhombic dodecahedron."""
+    def __init__(self, diameter=1):
+        def mkFace(*args): return Face(*[Point(*a) for a in args])
+        # top four faces
+        faces = [
+            mkFace([-1,-1,1],[0,-2,0],[1,-1,1],[0,0,2]).transform(
+                TransformMatrix.rotateAxis(Point(0,0,1), angle=i*pi/2)
+            ) for i in xrange(0,4)
+        ]
+        # two middle faces
+        faces += [
+            mkFace([-1,-1,-1],[0,-2,0],[-1,-1,1],[-2,0,0]).transform(
+                TransformMatrix.rotateAxis(Point(0,0,1), angle=i*pi/2)
+            ) for i in xrange(0,4,2)
+        ]
+        # bottom four+two faces
+        faces += [f.transform(
+            TransformMatrix.rotateAxis(Point(1,0,0), angle=pi)
+        ) for f in faces]
+        Shape.__init__(self, "Rhombic Dodecahedron", [f*(diameter/4) for f in faces])
+
 def name_to_shape(str, diameter, default="dodecahedron"):
     if str.lower() == 'dodecahedron':
         return Dodecahedron(diameter)
     if str.lower() == 'icosahedron':
         return Icosahedron(diameter)
+    if str.lower() == 'rd' or str.lower() == 'rhombic dodecahedron':
+        return RhombicDodecahedron(diameter)
     # Default
     return name_to_shape(default, diameter)
 
@@ -482,7 +507,7 @@ class LayerSettings:
 
     def parse_meta(self):
         DEFAULT_PLANE = {
-            'shape': 'dodecahedron',
+            'shape': 'rhombic dodecahedron',
             'size': '3in',
             'symmetry': '1',
             'frontThick': '.125in',
@@ -726,7 +751,7 @@ class StellationEffect(inkex.Effect):
             # we'll use opacity so these overlapped regions show up nice
             other_line = Line(other_line.point +
                               (other_line.point - settings.origin) *
-                              self.unittouu(".01mm") * scootch,
+                              self.unittouu(SCOOTCH) * scootch,
                               other_line.direction)
             intersections = []
             for path in paths:
