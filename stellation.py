@@ -140,13 +140,19 @@ class Face:
         for i in xrange(0, l):
             assert ccw_from_origin(points[i], points[(i+1)%l], points[(i+2)%l], V=self.inside) > 0
     def __repr__(self):
-        return "Face(" + (",".join(repr(pt) for pt in self.points)) + ")"
+        return "Face(" + (",".join(repr(pt) for pt in self.points)) + \
+            ("" if self.inside is None else (", inside=%r" % self.inside)) + \
+            ")"
     def __str__(self):
         return "Face(" + (",".join(str(pt) for pt in self.points)) + ")"
     def __mul__(self, other):
-        return Face(*[pt*other for pt in self.points])
+        return Face(*[pt*other for pt in self.points], inside=self.inside)
     def __truediv__(self, other):
-        return Face(*[pt/other for pt in self.points])
+        return Face(*[pt/other for pt in self.points], inside=self.inside)
+    def shuffle(self, amt=1):
+        pts = list(self.points)
+        pts = pts[amt:] + pts[:amt]
+        return Face(*pts, inside=self.inside)
     def centroid(self):
         sum = Point(0,0,0)
         count = 0
@@ -394,6 +400,10 @@ class Dodecahedron(Shape):
         ] + [
             Face(*[-mkTop(4 - i) for i in xrange(0,5)])
         ]
+        # Rotate faces for tetrahedral symmetry
+        for i,j in [(0,0),(1,1),(2,4),(3,0),(4,2),(5,3),
+                    (6,1),(7,3),(8,2),(9,0),(10,4),(11,3)]:
+            faces[i] = faces[i].shuffle(j)
         Shape.__init__(self, "Dodecahedron", [f*(diameter/4) for f in faces])
 
 class Icosahedron(Shape):
@@ -918,14 +928,23 @@ class StellationEffect(inkex.Effect):
                      subpath in paths
                      )))
         f.write( '}\n' )
-        f.write( 'for (m=[\n' )
-        f.write('  ' + ',\n  '.join(
+        f.write( 'faceMatrix = [\n' )
+        f.write( '  ' + ',\n  '.join(
             Shape.faceTransform(settings.shape.representativeFace(), face)
             .toOpenSCAD()
             for face in settings.shape.faces
-        ) + '])\n')
-        f.write( '  multmatrix(m=m)\n')
+        ) + '];\n')
+        f.write( 'faceColors = [\n' )
+        f.write( ' "black", "brown", "red", "orange", "yellow",\n' );
+        f.write( ' "green", "blue", "violet", "grey", "white",\n' );
+        f.write( ' "white", "white", "white", "white"\n' );
+        f.write( '];\n');
+        f.write( 'for (f=[0:%d]) {\n' % (len(settings.shape.faces)-1) )
+        #f.write( '  echo(f=f);\n')
+        f.write( '  color(faceColors[f%len(faceColors)])\n')
+        f.write( '  multmatrix(m=faceMatrix[f])\n')
         f.write( '  layer_%s();\n' % settings.layer.get('id') )
+        f.write( '}\n')
 
 if __name__ == '__main__':
     e = StellationEffect()
