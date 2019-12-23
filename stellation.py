@@ -252,6 +252,7 @@ class Plane:
             return None # parallel
         s = self.normal.dot(self.point - line.point) / nu
         return line.point + (line.direction * s)
+
     def intersectPlane(self, plane):
         n3 = self.normal.cross(plane.normal)
         if near_zero(n3.dist()):
@@ -382,6 +383,40 @@ class Shape:
         rotCos = plane1.normal.dot(plane2.normal)
         return TransformMatrix.rotateAxis(axis, cos=rotCos)
 
+class Tetrahedron(Shape):
+    """A tetrahedron."""
+    def __init__(self, diameter=1):
+        pt = [Point(+1,0,-1/sqrt(2)),
+              Point(-1,0,-1/sqrt(2)),
+              Point(0,+1,+1/sqrt(2)),
+              Point(0,-1,+1/sqrt(2))]
+        faces=[Face(pt[0],pt[1],pt[2]),
+               Face(pt[3],pt[1],pt[0]),
+               Face(pt[0],pt[2],pt[3]),
+               Face(pt[3],pt[2],pt[1])]
+        # Diameter is edge length
+        Shape.__init__(self, "Tetrahedron", [f*(diameter/2) for f in faces])
+
+class Octahedron(Shape):
+    """A octahedron."""
+    def __init__(self, diameter=1):
+        pt = [Point(+1,0,0),
+              Point(-1,0,0),
+              Point(0,+1,0),
+              Point(0,-1,0),
+              Point(0,0,+1),
+              Point(0,0,-1)]
+        faces=[Face(pt[0],pt[2],pt[4]),
+               Face(pt[4],pt[2],pt[1]),
+               Face(pt[4],pt[3],pt[0]),
+               Face(pt[1],pt[3],pt[4]),
+               Face(pt[5],pt[2],pt[0]),
+               Face(pt[1],pt[2],pt[5]),
+               Face(pt[0],pt[3],pt[5]),
+               Face(pt[5],pt[3],pt[1])]
+        # Diameter is edge length
+        Shape.__init__(self, "Octahedron", [f*(diameter/sqrt(2)) for f in faces])
+
 class Dodecahedron(Shape):
     """A dodecahedron."""
     def __init__(self, diameter=1):
@@ -425,6 +460,40 @@ class Icosahedron(Shape):
         ]
         Shape.__init__(self, "Icosahedron", [f*(diameter/2) for f in faces])
 
+class TetrahedralIcosahedron(Shape):
+    """A tetrahedrally-stellated icosahedron."""
+    def __init__(self, which=0, diameter=1):
+        faces20 = Icosahedron(diameter).faces
+        # Rotate faces for symmetry
+        for i,j in [(0,0), # t
+                    (1,0), #0
+                    (2,0), # m
+                    (3,1),(4,2),(5,2),(6,1),(7,0),
+                    (8,0), # t
+                    (9,0), # m
+                    (10,0),#m
+                    (11,0), #t
+                    (12,0),(13,1),(14,2),(15,2),(16,1),
+                    (17,0), #m
+                    (18,0),
+                    (19,0) #t
+        ]:
+            faces20[i] = faces20[i].shuffle(j)
+        tfaces = [0,8,11,19]
+        mfaces = [2,9,10,17]
+        if which == 0:
+            # just the four tetrahedral faces, ie faces parallel to some
+            # face in faces4
+            faces = [faces20[i] for i in tfaces]
+        elif which == 1:
+            # just the four tetrahedral faces, ie faces parallel to some
+            # face in faces4
+            faces = [faces20[i] for i in mfaces]
+        else: # everything else
+            faces = [faces20[i] for i in xrange(20)
+                     if not any(t == i for t in tfaces + mfaces)]
+        Shape.__init__(self, "Icosahedron-T%d" % which, faces)
+
 class RhombicDodecahedron(Shape):
     """A rhombic dodecahedron."""
     def __init__(self, diameter=1):
@@ -448,10 +517,20 @@ class RhombicDodecahedron(Shape):
         Shape.__init__(self, "Rhombic Dodecahedron", [f*(diameter/4) for f in faces])
 
 def name_to_shape(str, diameter, default="dodecahedron"):
+    if str.lower() == 'tetrahedron':
+        return Tetrahedron(diameter) # no actual stellations
+    if str.lower() == 'octahedron':
+        return Octahedron(diameter) # only one stellation
     if str.lower() == 'dodecahedron':
         return Dodecahedron(diameter)
     if str.lower() == 'icosahedron':
         return Icosahedron(diameter)
+    if str.lower() == 'icosahedron-t0':
+        return TetrahedralIcosahedron(0, diameter)
+    if str.lower() == 'icosahedron-t1':
+        return TetrahedralIcosahedron(1, diameter)
+    if str.lower() == 'icosahedron-t2':
+        return TetrahedralIcosahedron(2, diameter)
     if str.lower() == 'rd' or str.lower() == 'rhombic dodecahedron':
         return RhombicDodecahedron(diameter)
     # Default
@@ -474,6 +553,8 @@ class LayerSettings:
     translation = Point(0, 0, 0)
     scaleFactor = 1
 
+    paths = None
+
     pageFace = None # used to establish rotation to page
     pageToShapeXform = None
     shapeToPageXform = None
@@ -481,7 +562,7 @@ class LayerSettings:
     def __init__(self, effect, layer):
         self.effect = effect
         self.layer = layer
-        self.metaLayer = effect.ensure_layer(layer, 'Meta')
+        self.metaLayer = effect.ensure_layer(layer, 'Meta', locked=False)
         self.markingsLayer = effect.ensure_layer(layer, 'Markings', locked=False)
         self.parse_meta()
         self.parse_origin()
@@ -602,6 +683,40 @@ class LayerSettings:
             'y': self.origin.y,
         }))
 
+    def get_paths(self, use_symmetry=True):
+        if self.paths is not None:
+            if use_symmetry:
+                return [item for sublist in self.paths for item  in sublist]
+            else:
+                return self.paths[0]
+        # simplify / rotate shape
+        self.paths = []
+        for i in xrange(self.symmetry):
+            self.paths.append([])
+            xform = (
+                TransformMatrix.translate(self.origin) *
+                TransformMatrix.rotateAxis(
+                    Point(0,0,1), angle=2*pi*i/self.symmetry
+                ) *
+                TransformMatrix.translate(-self.origin)
+            )
+            for node in self.effect.layer_contents(self.layer):
+                if node.tag == inkex.addNS('path', 'svg'):
+                    xform2 = xform * TransformMatrix.fromSVG(
+                        simpletransform.parseTransform(node.get('transform'))
+                    )
+                    d = node.get('d')
+                    p = cubicsuperpath.parsePath(d)
+                    cspsubdiv.cspsubdiv(p, FLATNESS)
+                    for sp in p:
+                        thisPath = []
+                        for csp in sp:
+                            thisPath.append(
+                                Point(csp[1][0],csp[1][1],0).transform(xform2)
+                            )
+                        self.paths[i].append(thisPath)
+        return self.get_paths(use_symmetry)
+
 class StellationEffect(inkex.Effect):
 
     def __init__(self):
@@ -627,15 +742,16 @@ class StellationEffect(inkex.Effect):
 
         if self.options.add:
             self.add_new_plane()
-        for layer in self.stellation_layers():
-            self.update_layer(layer, output=output)
+        all_layers = [LayerSettings(self, l) for l in self.stellation_layers()]
+        for settings in all_layers:
+            self.update_layer_xform(settings)
+        for settings in all_layers:
+            self.update_layer(settings, all_layers, output=output)
 
-    def update_layer(self, layer, output=None):
-        settings = LayerSettings(self, layer)
-        self.update_layer_xform(settings)
-        self.update_layer_guidelines(settings)
+    def update_layer(self, settings, all_layers, output=None):
+        self.update_layer_guidelines(settings, all_layers)
         self.update_layer_symmetry(settings)
-        self.update_layer_intersections(settings)
+        self.update_layer_intersections(settings, all_layers)
         if output is not None:
             self.openscadLayer(settings, output)
 
@@ -650,43 +766,48 @@ class StellationEffect(inkex.Effect):
             for node in self.layer_contents(layer):
                 simpletransform.applyTransformToNode(mat, node)
 
-    def update_layer_guidelines(self, settings):
+    def update_layer_guidelines(self, settings, all_layers):
         guidelines = self.ensure_layer(settings.layer, 'Guidelines')
         # save style from existing guidelines (if any)
-        els = guidelines.xpath("./svg:path", namespaces=inkex.NSS)
-        oldStyle = None if len(els) < 1 else els[0].get('style')
+        def getStyle(settings):
+            guidelines = self.ensure_layer(settings.layer, 'Guidelines')
+            els = guidelines.xpath("./svg:path", namespaces=inkex.NSS)
+            return None if len(els) < 1 else els[0].get('style')
+        layerStyles = sorted([(0 if s is settings else 1, s, getStyle(s))
+                              for s in all_layers])
         # delete all existing guidelines
         self.delete_layer_contents(guidelines)
         # compute new guidelines
         face = settings.shape.representativeFace()
-        path = ""
-        for plane in settings.shape.planes:
-            line = face.plane().intersect(plane)
-            if line is None: continue # parallel plane
-            # Compute points where this line intersects the page bounding planes
-            line = line.transform(settings.shapeToPageXform)
-            pts = [line.intersect(p) for p in self.pagePlanes()]
-            # filter out points outside page face
-            pageFace = self.pageFace()
-            pts = [p for p in pts if
-                   p is not None and
-                   p.x + EPSILON >= pageFace.points[0].x and
-                   p.y + EPSILON >= pageFace.points[0].y and
-                   p.x - EPSILON <= pageFace.points[2].x and
-                   p.y - EPSILON <= pageFace.points[2].y]
-            if len(pts) == 0: continue # line outside of page bounds
-            assert len(pts) == 2
-            path += "M %f,%f L %f,%f " % (pts[0].x, pts[0].y, pts[1].x, pts[1].y)
-        inkex.etree.SubElement(guidelines, inkex.addNS('path', 'svg'),{
-            'd': path,
-            'style': simplestyle.formatStyle({
-                'opacity': 1,
-                'fill': 'none',
-                'stroke': 'red',
-                'stroke-width': 1,
-                'stroke-linecap': 'butt',
-            }) if oldStyle is None else oldStyle,
-        })
+        for sortKey,s,oldStyle in layerStyles:
+            path = ""
+            for plane in s.shape.planes:
+                line = face.plane().intersect(plane)
+                if line is None: continue # parallel plane
+                # Compute points where this line intersects the page bounding planes
+                line = line.transform(settings.shapeToPageXform)
+                pts = [line.intersect(p) for p in self.pagePlanes()]
+                # filter out points outside page face
+                pageFace = self.pageFace()
+                pts = [p for p in pts if
+                       p is not None and
+                       p.x + EPSILON >= pageFace.points[0].x and
+                       p.y + EPSILON >= pageFace.points[0].y and
+                       p.x - EPSILON <= pageFace.points[2].x and
+                       p.y - EPSILON <= pageFace.points[2].y]
+                if len(pts) == 0: continue # line outside of page bounds
+                assert len(pts) == 2
+                path += "M %f,%f L %f,%f " % (pts[0].x, pts[0].y, pts[1].x, pts[1].y)
+            inkex.etree.SubElement(guidelines, inkex.addNS('path', 'svg'),{
+                'd': path,
+                'style': simplestyle.formatStyle({
+                    'opacity': 1,
+                    'fill': 'none',
+                    'stroke': 'red',
+                    'stroke-width': 1,
+                    'stroke-linecap': 'butt',
+                }) if oldStyle is None else oldStyle,
+            })
 
     def update_layer_symmetry(self, settings):
         symmetry = self.ensure_layer(settings.layer, 'Symmetry')
@@ -711,113 +832,101 @@ class StellationEffect(inkex.Effect):
                         inkex.addNS('href','xlink'): '#' + id,
                     })
 
-    def update_layer_intersections(self, settings):
+    def update_layer_intersections(self, settings, all_layers):
         intersectionLayer = self.ensure_layer(settings.layer, 'Intersections')
         # save style from existing intersections (if any)
-        els = intersectionLayer.xpath("./svg:path", namespaces=inkex.NSS)
-        oldStyle = None if len(els) < 1 else els[0].get('style')
+        def getStyle(settings):
+            intersectionLayer = self.ensure_layer(settings.layer, 'Intersections')
+            els = intersectionLayer.xpath("./svg:path", namespaces=inkex.NSS)
+            return None if len(els) < 1 else els[0].get('style')
+        layerStyles = sorted([(0 if s is settings else 1, s, getStyle(s))
+                              for s in all_layers])
         # delete all existing intersections
         self.delete_layer_contents(intersectionLayer)
-        # simplify / rotate shape
-        # XXX should probably do the shape parsing *once*, and then
-        # rotate / reuse for openSCAD export / etc (store in settings?)
-        paths = []
-        for i in xrange(settings.symmetry):
-            xform = (
-                TransformMatrix.translate(settings.origin) *
-                TransformMatrix.rotateAxis(
-                    Point(0,0,1), angle=2*pi*i/settings.symmetry
-                ) *
-                TransformMatrix.translate(-settings.origin)
-            )
-            for node in self.layer_contents(settings.layer):
-                if node.tag == inkex.addNS('path', 'svg'):
-                    xform2 = xform * TransformMatrix.fromSVG(
-                        simpletransform.parseTransform(node.get('transform'))
-                    )
-                    d = node.get('d')
-                    p = cubicsuperpath.parsePath(d)
-                    cspsubdiv.cspsubdiv(p, FLATNESS)
-                    for sp in p:
-                        thisPath = []
-                        for csp in sp:
-                            thisPath.append(
-                                Point(csp[1][0],csp[1][1],0).transform(xform2)
-                            )
-                        paths.append(thisPath)
         # compute new intersections
-        face = settings.shape.representativeFace()
-        d1,d2 = "",""
-        for other_face,scootch in \
-            [(f,s) for f in settings.shape.faces for s in [1,-1]]:
-            line = face.plane().intersect(other_face.plane())
-            if line is None: continue # parallel plane
-            # Compute points where this line intersects the figure
-            other_line = line.transform(
-                settings.shapeToPageXform *
-                Shape.faceTransform(other_face, face)
-            )
-            # tweak this line just a scootch toward/away from the origin
-            # we'll use opacity so these overlapped regions show up nice
-            other_line = Line(other_line.point +
-                              (other_line.point - settings.origin) *
-                              self.unittouu(SCOOTCH) * scootch,
-                              other_line.direction)
-            intersections = []
-            for path in paths:
-                for i in xrange(len(path)-1):
-                    p0,p1 = path[i],path[i+1]
-                    # compute 2d intersection of l with segment(p1->p2)
-                    for s in other_line.intersect2dSegment(p0, p1):
-                        intersections.append(s)
-            # now transform these intersections into points on the original line
-            intersections = [(line.point + line.direction * s)
-                             for s in sorted(intersections)]
-            # XXX should make the thicknesses match
-            intersections = [pt.transform(settings.shapeToPageXform)
-                             for pt in intersections]
-            # XXX this is projection, but should really widen to account for
-            # angle
-            front = (line.point + other_face.plane().normal).transform(
-                settings.shapeToPageXform
-            ) - line.point.transform(settings.shapeToPageXform)
-            front = Point(front.x, front.y, 0).normalized()
-
-            for i in xrange(0, len(intersections), 2):
-                s,e = intersections[i], intersections[i+1]
-                p0 = s + front*settings.frontThick
-                p1 = e + front*settings.frontThick
-                p2 = e - front*settings.backThick
-                p3 = s - front*settings.backThick
-                dd = "M %f,%f L %f,%f L %f,%f L %f,%f Z " % (
-                    p0.x, p0.y,
-                    p1.x, p1.y,
-                    p2.x, p2.y,
-                    p3.x, p3.y,
+        repFace = settings.shape.representativeFace()
+        for sortKey, s, oldStyle in layerStyles:
+            d1,d2 = "",""
+            otherRepFace = s.shape.representativeFace()
+            for other_face,scootch in \
+                [(f,sc) for f in s.shape.faces for sc in [1,-1]]:
+                line = repFace.plane().intersect(other_face.plane())
+                # line is in model (not page) plane for both face and other_face
+                if line is None: continue # parallel plane
+                # Compute points where this line intersects the figure
+                # Transform to *page* plane for other_face
+                other_line = line.transform(
+                    s.shapeToPageXform *
+                    Shape.faceTransform(other_face, otherRepFace)
                 )
-                if scootch > 0:
-                    d1 += dd
-                else:
-                    d2 += dd
-        oldStyle = None
-        inkex.etree.SubElement(intersectionLayer, inkex.addNS('path', 'svg'), {
-            'd': d1,
-            'style': simplestyle.formatStyle({
-                'opacity': 0.5,
-                'fill': 'blue',
-                'stroke': 'none',
-                'stroke-width': 2,
-            }) if oldStyle is None else oldStyle,
-        })
-        inkex.etree.SubElement(intersectionLayer, inkex.addNS('path', 'svg'), {
-            'd': d2,
-            'style': simplestyle.formatStyle({
-                'opacity': 0.5,
-                'fill': 'blue',
-                'stroke': 'none',
-                'stroke-width': 2,
-            }) if oldStyle is None else oldStyle,
-        })
+                # tweak this line just a scootch toward/away from the origin
+                # we'll use opacity so these overlapped regions show up nice
+                other_line = Line(other_line.point +
+                                  (other_line.point - s.origin) *
+                                  self.unittouu(SCOOTCH) * scootch,
+                                  other_line.direction)
+                intersections = []
+                for path in s.get_paths():
+                    for i in xrange(len(path)-1):
+                        p0,p1 = path[i],path[i+1]
+                        # compute 2d intersection of l with segment(p1->p2)
+                        for seg in other_line.intersect2dSegment(p0, p1):
+                            intersections.append(seg)
+                # intersections now has a list of 's' parameters (multiple of
+                # line.direction); use these to transform these intersections
+                # into points on the original (untransformed) line; this
+                # line is in the *model* space for both repFace and other_face
+                intersections = [(line.point + line.direction * s_param)
+                                 for s_param in sorted(intersections)]
+                # XXX should make the thicknesses match
+                # convert from model space to page space for repFace
+                intersections = [pt.transform(settings.shapeToPageXform)
+                                 for pt in intersections]
+                # Compute a direction vector in repFace *page* space for the
+                # "front" (plane normal) vector for other_face
+                front = (line.point + other_face.plane().normal).transform(
+                    settings.shapeToPageXform
+                ) - line.point.transform(settings.shapeToPageXform)
+                # project into 2d; we're throwing away interesting information
+                # here about relative thickness accounting for the angle of
+                # the face; XXX should really scale this vector to account
+                # for that!
+                front = Point(front.x, front.y, 0).normalized()
+
+                for i in xrange(0, len(intersections), 2):
+                    start,end = intersections[i], intersections[i+1]
+                    p0 = start + front*settings.frontThick
+                    p1 = end   + front*settings.frontThick
+                    p2 = end   - front*settings.backThick
+                    p3 = start - front*settings.backThick
+                    dd = "M %f,%f L %f,%f L %f,%f L %f,%f Z " % (
+                        p0.x, p0.y,
+                        p1.x, p1.y,
+                        p2.x, p2.y,
+                        p3.x, p3.y,
+                    )
+                    if scootch > 0:
+                        d1 += dd
+                    else:
+                        d2 += dd
+            inkex.etree.SubElement(intersectionLayer, inkex.addNS('path', 'svg'), {
+              'd': d1,
+              'style': simplestyle.formatStyle({
+                  'opacity': 0.5,
+                  'fill': 'blue',
+                  'stroke': 'none',
+                  'stroke-width': 2,
+              }) if oldStyle is None else oldStyle,
+            })
+            inkex.etree.SubElement(intersectionLayer, inkex.addNS('path', 'svg'), {
+              'd': d2,
+              'style': simplestyle.formatStyle({
+                  'opacity': 0.5,
+                  'fill': 'blue',
+                  'stroke': 'none',
+                  'stroke-width': 2,
+              }) if oldStyle is None else oldStyle,
+            })
 
     def delete_layer_contents(self, layer):
         attribs = layer.items()
@@ -897,30 +1006,14 @@ class StellationEffect(inkex.Effect):
                    settings.frontThick+settings.backThick ) )
         points = []
         pointMap = {}
-        def pointToIdx(x, y, xform):
-            key = repr((x,y))
+        def pointToIdx(pt):
+            key = repr((pt.x,pt.y))
             if not pointMap.has_key(key):
                 pointMap[key] = len(points)
-                points.append(Point(x,y,0).transform(xform)-settings.origin)
+                points.append(pt-settings.origin)
             return pointMap[key]
-        paths = []
-        for node in self.layer_contents(settings.layer):
-            # emit openscad polygon
-            if node.tag == inkex.addNS('path','svg'):
-                xform = TransformMatrix.fromSVG(
-                    simpletransform.parseTransform(node.get('transform'))
-                )
-                pointMap.clear() # new xform, clear pointMap
-                d = node.get('d')
-                p = cubicsuperpath.parsePath(d)
-                cspsubdiv.cspsubdiv(p, FLATNESS)
-                for sp in p:
-                    thisPath = []
-                    for csp in sp:
-                        idx = pointToIdx(csp[1][0],csp[1][1],xform)
-                        thisPath.append(idx)
-                    paths.append(thisPath)
-            # XXX we should probably parse g, circle, rect, etc
+        paths = [[pointToIdx(p) for p in subpath]
+                 for subpath in settings.get_paths(use_symmetry=False)]
         f.write('    polygon(points=[%s], paths=[%s]);\n' %
                 (",".join(("[%f,%f]" % (p.x, p.y)) for p in points),
                  ",".join(
@@ -928,23 +1021,24 @@ class StellationEffect(inkex.Effect):
                      subpath in paths
                      )))
         f.write( '}\n' )
-        f.write( 'faceMatrix = [\n' )
-        f.write( '  ' + ',\n  '.join(
+        f.write( 'module combined_%s() {\n' % settings.layer.get('id') )
+        f.write( '  faceMatrix = [\n' )
+        f.write( '    ' + ',\n  '.join(
             Shape.faceTransform(settings.shape.representativeFace(), face)
             .toOpenSCAD()
             for face in settings.shape.faces
         ) + '];\n')
-        f.write( 'faceColors = [\n' )
-        f.write( ' "black", "brown", "red", "orange", "yellow",\n' );
-        f.write( ' "green", "blue", "violet", "grey", "white",\n' );
-        f.write( ' "white", "white", "white", "white"\n' );
-        f.write( '];\n');
-        f.write( 'for (f=[0:%d]) {\n' % (len(settings.shape.faces)-1) )
-        #f.write( '  echo(f=f);\n')
-        f.write( '  color(faceColors[f%len(faceColors)])\n')
-        f.write( '  multmatrix(m=faceMatrix[f])\n')
-        f.write( '  layer_%s();\n' % settings.layer.get('id') )
+        f.write( '  faceColors = [\n' )
+        f.write( '   "black", "brown", "red", "orange", "yellow",\n' );
+        f.write( '   "green", "blue", "violet", "grey", "white"\n' );
+        f.write( '  ];\n');
+        f.write( '  for (f=[0:%d]) {\n' % (len(settings.shape.faces)-1) )
+        f.write( '    color(faceColors[f%len(faceColors)])\n')
+        f.write( '    multmatrix(m=faceMatrix[f])\n')
+        f.write( '    layer_%s();\n' % settings.layer.get('id') )
+        f.write( '  }\n')
         f.write( '}\n')
+        f.write( 'combined_%s();\n' % settings.layer.get('id'))
 
 if __name__ == '__main__':
     e = StellationEffect()
