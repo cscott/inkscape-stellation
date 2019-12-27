@@ -546,6 +546,9 @@ class LayerSettings:
 
     shape = None
     symmetry = 1
+    symmetryMirror = None
+    markingSymmetry = True
+
     frontThick = None
     backThick = None
 
@@ -601,8 +604,8 @@ class LayerSettings:
             'shape': 'rhombic dodecahedron',
             'size': '3in',
             'symmetry': '1',
-            'frontThick': '.125in',
-            'backThick': '0',
+            'frontThick': '0.5mm',
+            'backThick': '0.5mm',
         }
         # Look for the text element
         els = self.metaLayer.xpath(
@@ -641,6 +644,10 @@ class LayerSettings:
             self.scaleFactor = newDiameter / oldDiameter
         if newData.get('symmetry') is not None:
             self.symmetry = int(newData['symmetry'])
+        if newData.get('symmetryMirror') is not None:
+            self.symmetryMirror = int(newData['symmetryMirror'])
+        if newData.get('markingSymmetry') is not None:
+            self.markingSymmetry = bool(newData['markingSymmetry'])
         self.frontThick = self.effect.unittouu(newData.get('frontThick', '3mm'))
         self.backThick = self.effect.unittouu(newData.get('backThick', '0'))
         textEl.set('data-stellation', self.toString(newData))
@@ -813,26 +820,44 @@ class StellationEffect(inkex.Effect):
         symmetry = self.ensure_layer(settings.layer, 'Symmetry')
         # delete all existing stuff
         self.delete_layer_contents(symmetry)
-        for i in xrange(settings.symmetry - 1):
+        for i in xrange(settings.symmetry):
             g = inkex.etree.SubElement(symmetry, inkex.addNS('g', 'svg'), {
                 'transform':'rotate(%f %f %f)' % (
-                    360*(i+1)/settings.symmetry,
+                    360*i/settings.symmetry,
                     settings.origin.x,
                     settings.origin.y,
                 )
             })
             for layer in [settings.markingsLayer, settings.layer]:
+                if layer is settings.markingsLayer and \
+                   not settings.markingSymmetry:
+                    continue
                 for node in self.layer_contents(layer):
                     id = node.get('id')
                     if id is None:
                         # ensure there's an id
                         id = self.uniqueId('stella');
                         node.set('id', id)
-                    inkex.etree.SubElement(g, inkex.addNS('use', 'svg'), {
-                        inkex.addNS('href','xlink'): '#' + id,
-                    })
+                    if i > 0:
+                        inkex.etree.SubElement(g, inkex.addNS('use', 'svg'), {
+                            inkex.addNS('href','xlink'): '#' + id,
+                        })
+                    if settings.symmetryMirror is not None:
+                        transform = \
+                            ('translate(%f %f) rotate(%f) ' +
+                             'scale(-1 1) ' +
+                             'rotate(%f) translate(%f %f)') % \
+                            (settings.origin.x, settings.origin.y,
+                             -settings.symmetryMirror,
+                             settings.symmetryMirror,
+                             -settings.origin.x, -settings.origin.y)
+                        inkex.etree.SubElement(g, inkex.addNS('use', 'svg'), {
+                            inkex.addNS('href','xlink'): '#' + id,
+                            'transform': transform,
+                        })
 
     def update_layer_intersections(self, settings, all_layers):
+        # XXX Intersections do not take into account symmetry or symmetryMirror
         intersectionLayer = self.ensure_layer(settings.layer, 'Intersections')
         # save style from existing intersections (if any)
         def getStyle(settings):
@@ -1001,6 +1026,9 @@ class StellationEffect(inkex.Effect):
         f.write( '  for (i=[0:%d]) rotate(i*360/%d)\n' % (
             settings.symmetry-1, settings.symmetry
         ))
+        if settings.symmetryMirror is not None:
+            f.write('  for (flip=[1,-1]) rotate(%f) scale([flip,1]) rotate(%f)\n' %
+                    (-settings.symmetryMirror, settings.symmetryMirror))
         f.write( '  translate([0,0,%f]) linear_extrude(height=%f)\n' %
                  ( -settings.backThick,
                    settings.frontThick+settings.backThick ) )
@@ -1029,11 +1057,19 @@ class StellationEffect(inkex.Effect):
             for face in settings.shape.faces
         ) + '];\n')
         f.write( '  faceColors = [\n' )
-        f.write( '   "black", "brown", "red", "orange", "yellow",\n' );
-        f.write( '   "green", "blue", "violet", "grey", "white"\n' );
+        if True:
+            # resistor color code
+            f.write( '   "black", "brown", "red", "orange", "yellow",\n' );
+            f.write( '   "green", "blue", "violet", "grey", "white"\n' );
+        else:
+            # dodecahedron tetrahedral symmetry planes
+            f.write( '   "green", "blue", "red", "blue", "red",\n' );
+            f.write( '   "yellow", "yellow",\n' );
+            f.write( '   "blue", "green", "yellow", "green", "red"\n' );
         f.write( '  ];\n');
         f.write( '  for (f=[0:%d]) {\n' % (len(settings.shape.faces)-1) )
-        f.write( '    color(faceColors[f%len(faceColors)])\n')
+        if True: # color faces
+            f.write( '    color(faceColors[f%len(faceColors)])\n')
         f.write( '    multmatrix(m=faceMatrix[f])\n')
         f.write( '    layer_%s();\n' % settings.layer.get('id') )
         f.write( '  }\n')
