@@ -27,19 +27,17 @@ __version__ = '0.0.0'
 inkex.localize()
 
 
-### Your helper functions go here
-def points_to_svgd(p, close=True):
-    """ convert list of points (x,y) pairs
-        into a closed SVG path list
-    """
-    f = p[0]
-    p = p[1:]
-    svgd = 'M%.4f,%.4f' % f
-    for x in p:
-        svgd += 'L%.4f,%.4f' % x
-    if close:
-        svgd += 'z'
-    return svgd
+# To do:
+# * Intersections should take into account symmetry (incl mirror)
+# * Color options should come from settings
+# * Instead of page bounding box, the bounding box should come from a
+#   dedicated layer (initialized to page bounding box by default)
+#   so we can see multiple face shapes at once.
+# * Rhombic tricontrahedron
+# * More rigor about polyhedra derivations?  Explicit use of symmetry axes?
+#   Implement conway operators?
+
+### Helper functions
 
 # if a -> b -> c a counter-clockwise turn?
 # +1 if counter-clockwise, -1 is clockwise, 0 if colinear
@@ -126,6 +124,7 @@ class Point:
         return matrix.transform(self)
 
 class Vector(Point):
+    # In theory we'd be more careful about types, point - point = vector, etc.
     pass
 
 class Face:
@@ -516,6 +515,8 @@ class RhombicDodecahedron(Shape):
         ) for f in faces]
         Shape.__init__(self, "Rhombic Dodecahedron", [f*(diameter/4) for f in faces])
 
+# XXX This is a little ad-hoc, would be nice to automatically generate this
+# from the shape names, etc.
 def name_to_shape(str, diameter, default="dodecahedron"):
     if str.lower() == 'tetrahedron':
         return Tetrahedron(diameter) # no actual stellations
@@ -536,7 +537,7 @@ def name_to_shape(str, diameter, default="dodecahedron"):
     # Default
     return name_to_shape(default, diameter)
 
-### Your main function subclasses the inkex.Effect class
+### All the settings and common computations per layer
 
 class LayerSettings:
     effect = None
@@ -724,6 +725,8 @@ class LayerSettings:
                         self.paths[i].append(thisPath)
         return self.get_paths(use_symmetry)
 
+### Main function subclasses the inkex.Effect class
+
 class StellationEffect(inkex.Effect):
 
     def __init__(self):
@@ -739,7 +742,7 @@ class StellationEffect(inkex.Effect):
         )
 
 ### -------------------------------------------------------------------
-### This is your main function and is called when the extension is run.
+### This is the main function and is called when the extension is run.
 
     def effect(self):
         output = open(
